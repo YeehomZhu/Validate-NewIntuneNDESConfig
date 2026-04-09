@@ -1,7 +1,7 @@
 
 <#PSScriptInfo
 
-.VERSION 1.6
+.VERSION 1.8
 
 .GUID f4f1a062-5425-4ace-a47d-5604c1ba7be0
 
@@ -11,11 +11,13 @@
 
 .COPYRIGHT 
 
-.TAGS 
+.TAGS NDES Intune SCEP CertificateConnector PKI Validation
 
 .LICENSEURI 
 
-.PROJECTURI 
+.PROJECTURI https://github.com/leonzhu/Validate-NewIntuneNDESConfig
+
+
 
 .ICONURI 
 
@@ -31,6 +33,8 @@ Version 1.1 Bug fix
 Version 1.4 Adding support to collect system/application/GPresult log. Meanwhile, collect AADAgent Updater log which monitor NDES connector update event as well as test the network connection to connector update endpoint
 Version 1.5 Adding more codes to check event log
 Version 1.6 Bug fix and add code to check connector status
+Version 1.7 Add OS last restart time and NDES-related services last start time checks
+Version 1.8 Bug fixes: null SID guard, ESC registry existence check, null accountName guard, replace Get-WmiObject with Get-CimInstance, Get-Service ErrorAction, LastConnectionTime parse guard, add Import-Module WebAdministration
 #>
 
 <# 
@@ -223,6 +227,71 @@ Log-ScriptEvent $LogFilePath "**************************************************
 
 #######################################################################
 
+#region Checking OS last restart and NDES-related services last start time
+Write-host
+Write-host "......................................................."
+Write-host
+Write-host "Checking OS last restart time and NDES-related services last start time..." -ForegroundColor Yellow
+Write-host
+Log-ScriptEvent $LogFilePath "Checking OS last restart time and NDES-related services last start time" NDES_Validation 1
+
+# OS last restart
+$LastBootUpTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
+Write-Host "OS last restart time: " -NoNewline
+Write-Host $LastBootUpTime -ForegroundColor Cyan
+Log-ScriptEvent $LogFilePath "OS last restart time: $($LastBootUpTime)" NDES_Validation 1
+
+# NDES-related services to check
+$NDESRelatedServices = @(
+    "W3SVC",                      # IIS - World Wide Web Publishing Service
+    "PFXCertificateConnectorSvc", # Certificate Connector for Microsoft Intune
+    "PKICertificateConnectorSvc", # PKI Certificate Connector
+    "PkiRevokeConnectorSvc"       # PKI Revoke Connector
+)
+
+Write-host
+Write-Host "NDES-related services last start time:" -ForegroundColor Yellow
+Write-host
+
+foreach ($serviceName in $NDESRelatedServices) {
+    $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if ($svc) {
+        if ($svc.Status -eq "Running") {
+            $svcWMI = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+            if ($svcWMI -and $svcWMI.ProcessId -and $svcWMI.ProcessId -ne 0) {
+                $proc = Get-Process -Id $svcWMI.ProcessId -ErrorAction SilentlyContinue
+                if ($proc) {
+                    Write-Host "$($serviceName): " -NoNewline -ForegroundColor Cyan
+                    Write-Host "Running, last started at " -NoNewline
+                    Write-Host $proc.StartTime -ForegroundColor Cyan
+                    Log-ScriptEvent $LogFilePath "Service $($serviceName) is running, last started at $($proc.StartTime)" NDES_Validation 1
+                } else {
+                    Write-Host "$($serviceName): " -NoNewline -ForegroundColor Cyan
+                    Write-Host "Running (start time unavailable)"
+                    Log-ScriptEvent $LogFilePath "Service $($serviceName) is running (start time unavailable)" NDES_Validation 1
+                }
+            } else {
+                Write-Host "$($serviceName): " -NoNewline -ForegroundColor Cyan
+                Write-Host "Running (start time unavailable)"
+                Log-ScriptEvent $LogFilePath "Service $($serviceName) is running (start time unavailable)" NDES_Validation 1
+            }
+        } else {
+            Write-Host "$($serviceName): " -NoNewline -ForegroundColor DarkCyan
+            Write-Host "Not running (Status: $($svc.Status))"
+            Log-ScriptEvent $LogFilePath "Service $($serviceName) is not running. Status: $($svc.Status)" NDES_Validation 2
+        }
+    } else {
+        Write-Host "$($serviceName): " -NoNewline
+        Write-Host "Not found on this server" -ForegroundColor Gray
+        Log-ScriptEvent $LogFilePath "Service $($serviceName) not found on this server" NDES_Validation 1
+    }
+}
+
+Log-ScriptEvent $LogFilePath "*********************************************************************************"  NDES_Validation 1
+#endregion
+
+#######################################################################
+
 #region Checking if NDES server is the CA and NDES install
 
 Write-host "`n.......................................................`n"
@@ -379,7 +448,13 @@ Write-Host "Checking the Enhanced Configuration settings" -ForegroundColor Yello
 Log-ScriptEvent $LogFilePath "Checking the Enhanced Configuration settings" NDES_Validation 1 
 
 # Check for the current state of Enhanced Security Configuration
-$escState = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"
+$escRegPath = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"
+if (-not (Test-Path $escRegPath)) {
+    Write-Host "Warning: " -ForegroundColor Yellow -NoNewline
+    Write-Host "Enhanced Security Configuration registry key not found. Skipping check."
+    Log-ScriptEvent $LogFilePath "Enhanced Security Configuration registry key not found." NDES_Validation 2
+} else {
+$escState = Get-ItemProperty $escRegPath
 
 # If Enhanced Security Configuration is deactivated
 if ($escState.IsInstalled -eq 0) {
@@ -396,6 +471,7 @@ if ($escState.IsInstalled -eq 0) {
     Log-ScriptEvent $LogFilePath "Enhanced Security Configuration is activated."  NDES_Validation 3
 
 }
+} # end if Test-Path escRegPath
 
 Log-ScriptEvent $LogFilePath "*********************************************************************************"  NDES_Validation 1
 #endregion
@@ -464,11 +540,16 @@ Write-host "Checking NDES/SCEP Service Account local permissions..." -Foreground
 Write-host
 Log-ScriptEvent $LogFilePath "Checking NDES Service Account local permissions" NDES_Validation 1 
 
-$scepAppPoolinfo = Get-CimInstance -Namespace root/MicrosoftIISv2 -ClassName IIsApplicationPoolSetting -Property Name, WAMUserName |select-Object -Property Name, WAMUserName | Where-Object {$_.name -like "*SCEP"}
+$scepAppPoolinfo = Get-CimInstance -Namespace root/MicrosoftIISv2 -ClassName IIsApplicationPoolSetting -Property Name, WAMUserName -ErrorAction SilentlyContinue |select-Object -Property Name, WAMUserName | Where-Object {$_.name -like "*SCEP"}
 
 $accountName = $scepAppPoolinfo.WAMUserName 
 Write-host "SCEP is being run by account "  -NoNewline
 Write-Host $accountName  -ForegroundColor Cyan 
+
+if (-not $accountName) {
+    Write-Warning "Could not determine SCEP service account. IIS6 WMI Compatibility may not be installed or SCEP app pool not configured."
+    Log-ScriptEvent $LogFilePath "Could not determine SCEP service account" NDES_Validation 2
+}
 
 # Get the SID of the account
 #$accountSID = (Get-WmiObject -Class Win32_UserAccount | Where-Object {$_.caption -eq "$accountName"}).SID
@@ -525,6 +606,9 @@ if ((net localgroup) -match "Administrators"){
                 Write-Warning "Could not resolve SID for account $accountName. Skipping local security policy check."
                 $NDESSVCAccountSID = $null
             }
+            if (-not $NDESSVCAccountSID) {
+                Write-Warning "Skipping local security policy check as SID could not be resolved."
+            } else {
             $LocalSecPolResults = $LocalSecPol | Select-String $NDESSVCAccountSID
 
                 if ($LocalSecPolResults -match "SeServiceLogonRight"){
@@ -548,6 +632,7 @@ if ((net localgroup) -match "Administrators"){
                     Log-ScriptEvent $LogFilePath "NDES Service Account may _NOT_ been assigned Logon as a Service." NDES_Validation 3
             
                 }
+            } # end if $NDESSVCAccountSID
         }
 
     }
@@ -871,11 +956,11 @@ Write-Host "Checking the 'Log on As' for Certificate Connector " -ForegroundColo
 Write-host
 Log-ScriptEvent $LogFilePath "Checking the 'Log on As' for Certificate Connector " NDES_Validation 1 
 
-$connectorService = Get-Service -Name "PFXCertificateConnectorSvc"
+$connectorService = Get-Service -Name "PFXCertificateConnectorSvc" -ErrorAction SilentlyContinue
 
 if ($connectorService) {
     # Get the service's process
-    $serviceProcess = Get-WmiObject Win32_Service | Where-Object { $_.Name -eq $connectorService.Name }
+    $serviceProcess = Get-CimInstance Win32_Service -Filter "Name='PFXCertificateConnectorSvc'" -ErrorAction SilentlyContinue
 
     # Check if the service is running as Local System or as a specific user
     if ($serviceProcess.StartName -eq "LocalSystem") {
@@ -1032,7 +1117,12 @@ if (-not (Test-Path $connectorPath)){
             Write-Host $LastConnectionTime -ForegroundColor Cyan
             Log-ScriptEvent $LogFilePath "Connector last sync time: $($LastConnectionTime)."  NDES_Validation 1
 
-            $LastConnectionTime = Get-Date $LastConnectionTime
+            try { $LastConnectionTime = Get-Date $LastConnectionTime } catch {
+                Write-Warning "Could not parse LastConnectionTime value from registry."
+                Log-ScriptEvent $LogFilePath "Could not parse LastConnectionTime value from registry." NDES_Validation 2
+                $LastConnectionTime = $null
+            }
+            if ($LastConnectionTime) {
             $daysDifference = ($currentDate - $LastConnectionTime).Days
 
             # Check if the last sync date is not updated for more than 2 days
@@ -1044,7 +1134,7 @@ if (-not (Test-Path $connectorPath)){
                 Write-Host "Last sync date is updated within the last 1 day."
                 Log-ScriptEvent $LogFilePath "Last sync date is updated within the last 1 day."  NDES_Validation 1
             }
-
+            } # end if $LastConnectionTime
 
         } else  {
             Write-Host "Certificate with thumbprint $EncryptionCertThumbprint not found in the Personal certificate store."
@@ -1350,6 +1440,7 @@ $LogFileCollectionConfirmation = Read-Host
 
 if($LogFileCollectionConfirmation -eq "y"){
 
+    Import-Module WebAdministration -ErrorAction SilentlyContinue
     #get IIS log file location
     $IISLogPath = (Get-WebConfigurationProperty "/system.applicationHost/sites/siteDefaults" -name logfile.directory).Value + "\W3SVC1" -replace "%SystemDrive%",$env:SystemDrive
     $IISLogs = Get-ChildItem $IISLogPath| Sort-Object -Descending -Property LastWriteTime | Select-Object -First 3
