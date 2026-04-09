@@ -1,0 +1,11 @@
+# Logs and temp output
+*.log
+*.zip
+*.evtx
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
