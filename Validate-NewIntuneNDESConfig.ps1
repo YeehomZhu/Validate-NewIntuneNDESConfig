@@ -9,11 +9,11 @@
 
 .COMPANYNAME 
 
-.COPYRIGHT 
+.COPYRIGHT Copyright (c) 2026 Leon Zhu, Premkumar N. Licensed under the MIT License.
 
 .TAGS NDES Intune SCEP CertificateConnector PKI Validation
 
-.LICENSEURI 
+.LICENSEURI https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig/blob/master/LICENSE
 
 .PROJECTURI https://github.com/leonzhu/Validate-NewIntuneNDESConfig
 
