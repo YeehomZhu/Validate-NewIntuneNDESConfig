@@ -8,11 +8,12 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
         $manifestPath = Join-Path $moduleRoot 'IntuneCertificateConnectorDiagnostics.psd1'
         $modulePath = Join-Path $moduleRoot 'IntuneCertificateConnectorDiagnostics.psm1'
         $buildPath = Join-Path $moduleRoot 'build\Build-Module.ps1'
-            $publishPath = Join-Path $moduleRoot 'build\Publish-GalleryModule.ps1'
+        $publishPath = Join-Path $moduleRoot 'build\Publish-GalleryModule.ps1'
+        $readmePath = Join-Path $moduleRoot 'README.md'
     }
 
     It 'parses every module source file without errors' {
-            foreach ($path in @($manifestPath, $modulePath, $publishPath)) {
+        foreach ($path in @($manifestPath, $modulePath, $buildPath, $publishPath)) {
             $tokens = $null
             $parseErrors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile(
@@ -32,6 +33,19 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
         $moduleInfo.Author | Should -Not -BeNullOrEmpty
         $moduleInfo.Description | Should -Not -BeNullOrEmpty
         $moduleInfo.PrivateData.PSData.LicenseUri | Should -Not -BeNullOrEmpty
+    }
+
+    It 'includes detailed Gallery usage steps and feature-detection acknowledgement' {
+        $moduleInfo = Test-ModuleManifest -Path $manifestPath
+        $readme = Get-Content -Path $readmePath -Raw
+
+        $moduleInfo.Description | Should -Match 'Quick start:'
+        $moduleInfo.PrivateData.PSData.ReleaseNotes | Should -Match 'Jerry Abouelnasr'
+        foreach ($step in 1..6) {
+            $readme | Should -Match ("### Step {0}:" -f $step)
+        }
+        $readme | Should -Match 'Special thanks to \*\*Jerry Abouelnasr\*\*'
+        $readme | Should -Match 'feature-detection capability'
     }
 
     It 'defines the complete result ID set with supported literal statuses and categories' {

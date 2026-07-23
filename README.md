@@ -40,27 +40,65 @@ Since Microsoft Intune released the new Certificate Connector for SCEP certifica
 
 ## Installation and usage
 
-Install from PowerShell Gallery:
+### Step 1: Install the module
+
+On the NDES/Certificate Connector server, open **Windows PowerShell 5.1 or later as Administrator**, and install from PowerShell Gallery:
 
 ```powershell
 Install-Module -Name IntuneCertificateConnectorDiagnostics -Scope CurrentUser
-Test-IntuneCertificateConnector
 ```
 
-PowerShell automatically loads the installed module when the exported command is called. To run the repository version directly:
+If PowerShell asks whether to trust PSGallery, review the repository information and confirm according to your organization's policy.
+
+### Step 2: Import or update the module
+
+PowerShell automatically loads the installed module when the exported command is called. To import it explicitly:
+
+```powershell
+Import-Module IntuneCertificateConnectorDiagnostics -Force
+```
+
+To install a newer published version later:
+
+```powershell
+Update-Module -Name IntuneCertificateConnectorDiagnostics
+```
+
+To run the repository version instead of the Gallery package:
 
 ```powershell
 Import-Module .\IntuneCertificateConnectorDiagnostics.psd1 -Force
+```
+
+### Step 3: Run the complete validation
+
+Run the command directly on the NDES/connector server:
+
+```powershell
 Test-IntuneCertificateConnector
 ```
 
-Run from elevated Windows PowerShell on the NDES/connector server for complete results. A reduced connector-only run is also supported:
+The command is non-interactive and performs all applicable local, NDES, IIS, certificate, connector, network, TLS, updater, and event-log checks. A reduced connector-only run is also supported:
 
 ```powershell
 Test-IntuneCertificateConnector -SkipNdesChecks
 ```
 
-Create a local troubleshooting archive explicitly:
+The compatibility alias `Test-CertConnectorPrereqNetwork` runs the same public command.
+
+### Step 4: Interpret the result
+
+The final status is one of:
+
+- `PASS` — no failures or warnings were detected.
+- `PASS-WITH-WARNINGS` — no hard failure was detected, but one or more items require review.
+- `FAIL` — one or more prerequisites or health checks failed.
+
+Each warning or failure includes a check ID, observed details, and suggested remediation. Review the transcript path printed at the end of the run for the complete result.
+
+### Step 5: Collect troubleshooting evidence when needed
+
+Evidence collection is disabled by default. Enable it explicitly when preparing a support investigation:
 
 ```powershell
 Test-IntuneCertificateConnector `
@@ -68,7 +106,20 @@ Test-IntuneCertificateConnector `
 	-DiagnosticBundlePath C:\Temp\Intune-NDES-Diagnostics.zip
 ```
 
-The compatibility alias `Test-CertConnectorPrereqNetwork` is also exported.
+The ZIP can include recent IIS logs, exported event logs, GPResult, transcript, and metadata. Review the archive for sensitive information before sharing it.
+
+### Step 6: Use structured output for automation
+
+Use `PassThru` to receive one report object instead of parsing console text:
+
+```powershell
+$report = Test-IntuneCertificateConnector -PassThru
+$report.Overall
+$report.Counts
+$report.Results | Where-Object Status -eq 'Fail'
+```
+
+The report includes overall status, execution time, transcript and bundle paths, status counts, and every individual check result.
 
 ### Combined diagnostic parameters
 
@@ -98,7 +149,7 @@ The compatibility alias `Test-CertConnectorPrereqNetwork` is also exported.
 | CA Role | **Not** installed on NDES server |
 | NDES Role | Installed |
 | IIS + .NET Features | All required features installed |
-| .NET Framework | 4.7 or later |
+| .NET Framework | 4.7.2 or later |
 | SCEP App Pool | Started |
 | Service Account | Member of `IIS_IUSRS`, not `Administrators` |
 | HTTP Registry | `MaxFieldLength` and `MaxRequestBytes` set to `65534` |
@@ -119,7 +170,7 @@ The default execution displays the direct result without dumping individual obje
 %ProgramData%\Microsoft\IntuneCertificateConnector\Configuration\PrereqNetworkDiagnostic-<timestamp>.log
 ```
 
-For automation, request one report object. Its `Results` collection contains `Id`, `Category`, `Name`, `Status`, `Detail`, `Remediation`, and `Case` for every check:
+For automation, the report object's `Results` collection contains `Id`, `Category`, `Name`, `Status`, `Detail`, `Remediation`, and `Case` for every check:
 
 ```powershell
 $report = Test-IntuneCertificateConnector -PassThru
@@ -193,11 +244,15 @@ The helper prompts for the API key with masked input, holds plaintext only while
 
 Leon Zhu
 
+## Acknowledgements
+
+Special thanks to **Jerry Abouelnasr** for providing the new idea that inspired the connector feature-detection capability.
+
 ## Version History
 
 | Version | Notes |
 |---------|-------|
-| 2.0.1 | Updated package attribution and documentation |
+| 2.0.1 | Updated package attribution; added detailed usage steps and an acknowledgement for the feature-detection idea |
 | 2.0.0 | Merged NDES and Certificate Connector validation into one import-safe, non-interactive, Gallery-ready module |
 | 1.6 | Bug fixes and connector status checks |
 | 1.5 | Added more event log checks |
@@ -207,4 +262,4 @@ Leon Zhu
 
 ## Disclaimer
 
-This script is provided **as-is** for diagnostic purposes only. It does not make any changes to the server configuration.
+This module is provided **as-is** for diagnostic purposes only. It does not make any changes to the server configuration.
