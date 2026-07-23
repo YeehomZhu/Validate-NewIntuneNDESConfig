@@ -48,6 +48,12 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
         $readme | Should -Match 'feature-detection capability'
     }
 
+    It 'uses PSResourceGet for Gallery publication' {
+        $publisher = Get-Content -Path $publishPath -Raw
+        $publisher | Should -Match 'Publish-PSResource'
+        $publisher | Should -Not -Match '(?m)^\s*Publish-Module\s'
+    }
+
     It 'defines the complete result ID set with supported literal statuses and categories' {
         $content = Get-Content -Path $modulePath -Raw
         $resultCalls = @([regex]::Matches($content, "Add-Result\s+-Id\s+'([^']+)'", 'IgnoreCase'))

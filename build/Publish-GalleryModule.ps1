@@ -9,7 +9,7 @@
     publishes by using a SecureString API key. Unless a SecureString is passed
     explicitly, the script always prompts locally with masked input so a stale
     key cannot be reused accidentally. The plaintext key exists only in unmanaged
-    memory for the duration of Publish-Module and is explicitly cleared afterward.
+    memory for the duration of Publish-PSResource and is explicitly cleared afterward.
 
 .PARAMETER ApiKey
     Optional API key as a SecureString. If omitted, the script always prompts for
@@ -72,6 +72,11 @@ try {
         }
     }
 
+    $publisher = Get-Command Publish-PSResource -ErrorAction SilentlyContinue
+    if (-not $publisher) {
+        throw 'Microsoft.PowerShell.PSResourceGet 1.0 or later is required to publish this module.'
+    }
+
     $published = Find-Module -Name $manifest.Name -Repository $Repository -ErrorAction SilentlyContinue
     if ($published -and $manifest.Version -le $published.Version) {
         throw "Local version $($manifest.Version) must be greater than published version $($published.Version)."
@@ -103,10 +108,11 @@ try {
         throw 'The API key is empty.'
     }
 
-    Publish-Module `
+    Publish-PSResource `
         -Path $modulePath `
         -Repository $Repository `
-        -NuGetApiKey $plainApiKey `
+        -ApiKey $plainApiKey `
+        -Confirm:$false `
         -ErrorAction Stop
 } finally {
     if ($keyPointer -ne [IntPtr]::Zero) {

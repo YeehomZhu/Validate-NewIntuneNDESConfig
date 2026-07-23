@@ -232,7 +232,7 @@ Publish after reviewing the dry run:
 .\build\Publish-GalleryModule.ps1
 ```
 
-The helper prompts for the API key with masked input, holds plaintext only while `Publish-Module` runs, clears its unmanaged buffer, and removes the in-memory key variable afterward. Never put an API key in source, command history, environment variables, logs, or chat. The key must permit **Push new or update packages** and match the `IntuneCertificateConnectorDiagnostics` package name.
+The helper uses `Publish-PSResource`, prompts for the API key with masked input, holds plaintext only while the publish request runs, clears its unmanaged buffer, and removes the in-memory key variable afterward. Never put an API key in source, command history, environment variables, logs, or chat. The key must permit **Push new or update packages** and match the `IntuneCertificateConnectorDiagnostics` package name.
 
 ## References
 
