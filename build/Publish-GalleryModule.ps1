@@ -6,14 +6,14 @@
 
 .DESCRIPTION
     Builds and validates the module, checks for a Gallery version conflict, then
-    publishes by using a SecureString API key. If PSGallerySecureKey exists in
-    global scope, the script uses and removes it. Otherwise, it prompts locally
-    with masked input. The plaintext key exists only in unmanaged memory for the
-    duration of Publish-Module and is explicitly cleared afterward.
+    publishes by using a SecureString API key. Unless a SecureString is passed
+    explicitly, the script always prompts locally with masked input so a stale
+    key cannot be reused accidentally. The plaintext key exists only in unmanaged
+    memory for the duration of Publish-Module and is explicitly cleared afterward.
 
 .PARAMETER ApiKey
-    Optional API key as a SecureString. If omitted, the script uses the global
-    PSGallerySecureKey SecureString or prompts for masked input.
+    Optional API key as a SecureString. If omitted, the script always prompts for
+    masked input.
 
 .PARAMETER Repository
     PowerShell repository name. Default: PSGallery.
@@ -28,7 +28,6 @@
     .\build\Publish-GalleryModule.ps1
 #>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '', Justification = 'A global SecureString is an intentional same-session handoff and is removed after publication.')]
 param(
     [Security.SecureString]$ApiKey,
     [string]$Repository = 'PSGallery',
@@ -92,11 +91,8 @@ if (-not $PSCmdlet.ShouldProcess($target, 'Publish PowerShell module')) {
     return
 }
 
-if (-not $ApiKey -and $global:PSGallerySecureKey -is [Security.SecureString]) {
-    $ApiKey = $global:PSGallerySecureKey
-}
 if (-not $ApiKey) {
-    $ApiKey = Read-Host 'Paste the PowerShell Gallery API key' -AsSecureString
+    $ApiKey = Read-Host 'Paste a NEW PowerShell Gallery API key with Push new or update packages permission' -AsSecureString
 }
 
 $keyPointer = [IntPtr]::Zero
@@ -117,7 +113,6 @@ try {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPointer)
     }
     Remove-Variable plainApiKey, ApiKey, keyPointer -Force -ErrorAction SilentlyContinue
-    Remove-Variable PSGallerySecureKey -Scope Global -Force -ErrorAction SilentlyContinue
 }
 
 Write-Output "Published $($manifest.Name) $($manifest.Version) to $Repository."
