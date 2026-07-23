@@ -56,6 +56,8 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
         $publisher = Get-Content -Path $publishPath -Raw
         $publisher | Should -Match 'Publish-PSResource'
         $publisher | Should -Not -Match '(?m)^\s*Publish-Module\s'
+        $publisher | Should -Match 'appears truncated'
+        $publisher | Should -Match 'non-ASCII characters'
     }
 
     It 'defines the complete result ID set with supported literal statuses and categories' {
