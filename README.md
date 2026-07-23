@@ -191,12 +191,13 @@ The helper prompts for the API key with masked input, holds plaintext only while
 
 ## Authors
 
-Leon Zhu, Premkumar N
+Leon Zhu
 
 ## Version History
 
 | Version | Notes |
 |---------|-------|
+| 2.0.1 | Updated package attribution and documentation |
 | 2.0.0 | Merged NDES and Certificate Connector validation into one import-safe, non-interactive, Gallery-ready module |
 | 1.6 | Bug fixes and connector status checks |
 | 1.5 | Added more event log checks |

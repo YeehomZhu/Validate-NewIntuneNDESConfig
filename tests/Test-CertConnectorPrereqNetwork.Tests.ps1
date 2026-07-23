@@ -27,7 +27,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
     It 'contains a valid PowerShell Gallery module manifest' {
         $moduleInfo = Test-ModuleManifest -Path $manifestPath
         $moduleInfo.Name | Should -Be 'IntuneCertificateConnectorDiagnostics'
-        $moduleInfo.Version | Should -Be ([Version]'2.0.0')
+        $moduleInfo.Version | Should -Be ([Version]'2.0.1')
         $moduleInfo.Guid | Should -Not -Be ([Guid]::Empty)
         $moduleInfo.Author | Should -Not -BeNullOrEmpty
         $moduleInfo.Description | Should -Not -BeNullOrEmpty
