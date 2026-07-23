@@ -103,9 +103,15 @@ if (-not $ApiKey) {
 $keyPointer = [IntPtr]::Zero
 try {
     $keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ApiKey)
-    $plainApiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
+    $plainApiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer).Trim()
     if ([string]::IsNullOrWhiteSpace($plainApiKey)) {
         throw 'The API key is empty.'
+    }
+    if ($plainApiKey.Length -lt 32) {
+        throw 'The API key appears truncated. Copy the complete key value from PowerShell Gallery.'
+    }
+    if ($plainApiKey -notmatch '^[\x21-\x7E]+$') {
+        throw 'The API key contains whitespace or non-ASCII characters. Copy the raw key value again using an English input method.'
     }
 
     Publish-PSResource `
