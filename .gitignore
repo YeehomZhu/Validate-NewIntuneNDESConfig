@@ -2,6 +2,7 @@
 *.log
 *.zip
 *.evtx
+out/
 
 # VS Code
 .vscode/
