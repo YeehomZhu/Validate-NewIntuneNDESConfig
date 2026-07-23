@@ -252,6 +252,7 @@ Special thanks to **Jerry Abouelnasr** for providing the new idea that inspired 
 
 | Version | Notes |
 |---------|-------|
+| 2.0.2 | Reformatted the Gallery main description as a multiline numbered Quick Start |
 | 2.0.1 | Updated package attribution; added detailed usage steps and an acknowledgement for the feature-detection idea |
 | 2.0.0 | Merged NDES and Certificate Connector validation into one import-safe, non-interactive, Gallery-ready module |
 | 1.6 | Bug fixes and connector status checks |
