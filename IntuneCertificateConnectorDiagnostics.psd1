@@ -1,6 +1,6 @@
 @{
     RootModule        = 'IntuneCertificateConnectorDiagnostics.psm1'
-    ModuleVersion     = '2.0.2'
+    ModuleVersion     = '2.1.0'
     GUID              = 'bb2983e7-ce6b-4ffe-9a20-84f1c8ed502c'
     Author            = 'Leon Zhu'
     CompanyName       = ''
@@ -53,11 +53,15 @@ Acknowledgement: Thanks to Jerry Abouelnasr for the feature-detection idea.
             LicenseUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig/blob/master/LICENSE'
             ProjectUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig'
             ReleaseNotes = @'
-Version 2.0.2:
-- Reformats the Gallery main description as a multiline numbered Quick Start.
-- Keeps the Jerry Abouelnasr acknowledgement visible as a separate line.
-- Retains the import-safe module, PassThru reports, proxy-aware TLS and updater
-    checks, event-log analysis, and optional evidence collection.
+Version 2.1.0:
+- Reorganizes the PSM1 into foldable functional and diagnostic-phase regions.
+- Introduces an explicit per-run diagnostic context for cross-phase settings and
+    removes implicit parameter lookup from network and finalization orchestration.
+- Reduces module-global state to runtime result, transcript, bundle, concurrency,
+    and TLS callback capture data.
+- Retains the acknowledgement to Jerry Abouelnasr for the feature-detection idea.
+- Keeps the public command, alias, parameters, result IDs, report schema, and
+    diagnostic behavior compatible with version 2.0.2.
 '@
         }
     }

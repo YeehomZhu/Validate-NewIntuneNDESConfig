@@ -7,6 +7,8 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'Best-effort probes convert unavailable data into explicit diagnostic results.')]
 param()
 
+#region Module State and Constants
+
 $script:DiagnosticRunning = $false
 $script:EventLogNames = @(
     'Microsoft-Intune-CertificateConnectors/Admin',
@@ -16,9 +18,68 @@ $script:EventLogNames = @(
     'System'
 )
 
-# ---------------------------------------------------------------------------
-# Output and parsing helpers
-# ---------------------------------------------------------------------------
+function Initialize-DiagnosticContext {
+    param(
+        [string]$ConnectorType,
+        [string]$BaseAddress,
+        [string]$OutFile,
+        [switch]$SkipDynamic,
+        [switch]$SkipNdesChecks,
+        [switch]$SkipNetworkChecks,
+        [switch]$SkipEventLogChecks,
+        [int]$TimeoutSeconds,
+        [int]$EventLookbackDays,
+        [int]$MaxEvents,
+        [int]$ConnectorStaleHours,
+        [switch]$CollectLogs,
+        [string]$DiagnosticBundlePath,
+        [int]$IisLogCount,
+        [switch]$PassThru
+    )
+
+    return [pscustomobject]@{
+        ConnectorType           = $ConnectorType
+        BaseAddress             = $BaseAddress
+        OutFile                 = $OutFile
+        SkipDynamic             = [bool]$SkipDynamic
+        SkipNdesChecks          = [bool]$SkipNdesChecks
+        SkipNetworkChecks       = [bool]$SkipNetworkChecks
+        SkipEventLogChecks      = [bool]$SkipEventLogChecks
+        TimeoutSeconds          = $TimeoutSeconds
+        EventLookbackDays       = $EventLookbackDays
+        MaxEvents               = $MaxEvents
+        ConnectorStaleHours     = $ConnectorStaleHours
+        CollectLogs             = [bool]$CollectLogs
+        DiagnosticBundlePath    = $DiagnosticBundlePath
+        IisLogCount             = $IisLogCount
+        PassThru                = [bool]$PassThru
+        ConnKey                 = $null
+        InstallFolder           = $null
+        BaseHost                = $null
+        AgentsHost              = $null
+        LoginHost               = 'login.microsoftonline.com'
+        LocationUrl             = $null
+        Fqdn                    = $null
+        ProxyServer             = $null
+        ProxyPort               = $null
+        ProxyUser               = $null
+        ProxyResolution         = $null
+        ProxyUri                = $null
+        Product                 = $null
+        ClientCert              = $null
+        ConnectorServiceNames   = @()
+        ConnectorServices       = @()
+        ServiceSummary          = $null
+        OperatingSystemVersion  = $null
+        NdesRoleKnown           = $null
+        NdesRoleInstalled       = $null
+    }
+}
+
+#endregion Module State and Constants
+
+#region Output and Formatting
+
 function Write-Line {
     param([AllowEmptyString()] [string]$Text, [string]$Color = 'Gray')
 
@@ -79,11 +140,40 @@ function Add-Result {
     }
 }
 
-function Invoke-Finalization {
+function Section {
+    param([string]$Title)
 
-# ===========================================================================
-# Recent event-log analysis
-# ===========================================================================
+    Write-Line ''
+    Write-Line ("== {0} ==" -f $Title) 'White'
+}
+
+#endregion Output and Formatting
+
+#region Diagnostic Phase Orchestration
+
+function Invoke-Finalization {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context
+    )
+
+    $ConnectorType = $Context.ConnectorType
+    $BaseAddress = $Context.BaseAddress
+    $OutFile = $Context.OutFile
+    $SkipDynamic = $Context.SkipDynamic
+    $SkipNdesChecks = $Context.SkipNdesChecks
+    $SkipNetworkChecks = $Context.SkipNetworkChecks
+    $SkipEventLogChecks = $Context.SkipEventLogChecks
+    $EventLookbackDays = $Context.EventLookbackDays
+    $MaxEvents = $Context.MaxEvents
+    $CollectLogs = $Context.CollectLogs
+    $DiagnosticBundlePath = $Context.DiagnosticBundlePath
+    $IisLogCount = $Context.IisLogCount
+    $PassThru = $Context.PassThru
+    $connectorServiceNames = $Context.ConnectorServiceNames
+
+#region Event Log Validation
+
 Section 'Recent Certificate Connector and NDES event logs'
 if ($SkipEventLogChecks) {
     Add-Result -Id 'EVT00' -Category EventLog -Name 'Recent event-log analysis' -Status 'Info' `
@@ -183,9 +273,10 @@ if ($SkipEventLogChecks) {
         -Remediation 'Investigate service startup, timeout, identity, and dependency failures in the System log.'
 }
 
-# ===========================================================================
-# Optional evidence collection preparation
-# ===========================================================================
+#endregion Event Log Validation
+
+#region Evidence Collection
+
 Section 'Diagnostic evidence collection'
 if ($CollectLogs) {
     $collection = Initialize-DiagnosticCollection -RequestedPath $DiagnosticBundlePath -RecentIisLogCount $IisLogCount
@@ -200,9 +291,10 @@ if ($CollectLogs) {
         -Detail 'Not requested. Specify -CollectLogs to create a local ZIP.'
 }
 
-# ===========================================================================
-# Summary
-# ===========================================================================
+#endregion Evidence Collection
+
+#region Summary and Output
+
 Section 'Summary'
 $passes = @($script:Results | Where-Object { $_.Status -eq 'Pass' })
 $warnings = @($script:Results | Where-Object { $_.Status -eq 'Warn' })
@@ -256,6 +348,7 @@ if (-not $OutFile) {
         try { $null = New-Item -ItemType Directory -Path $outParent -Force -ErrorAction Stop } catch {}
     }
 }
+$Context.OutFile = $OutFile
 
 Write-Line ''
 Write-Line "  Transcript target: $OutFile" 'Cyan'
@@ -320,13 +413,33 @@ if ($PassThru) {
     Write-Output $report
 }
 
+#endregion Summary and Output
+
 }
 
 function Invoke-NetworkAndDynamicValidation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context
+    )
 
-# ===========================================================================
-# Network prerequisites
-# ===========================================================================
+    $agentsHost = $Context.AgentsHost
+    $baseHost = $Context.BaseHost
+    $clientCert = $Context.ClientCert
+    $installFolder = $Context.InstallFolder
+    $locationUrl = $Context.LocationUrl
+    $proxyPort = $Context.ProxyPort
+    $proxyResolution = $Context.ProxyResolution
+    $proxyServer = $Context.ProxyServer
+    $proxyUri = $Context.ProxyUri
+    $proxyUser = $Context.ProxyUser
+    $SkipDynamic = $Context.SkipDynamic
+    $SkipNdesChecks = $Context.SkipNdesChecks
+    $SkipNetworkChecks = $Context.SkipNetworkChecks
+    $TimeoutSeconds = $Context.TimeoutSeconds
+
+#region Network Prerequisites
+
 Section 'Network prerequisites'
 
 if ($SkipNetworkChecks) {
@@ -353,7 +466,7 @@ if ($SkipNetworkChecks) {
             -Detail 'No connector proxy is configured.'
     }
 
-    $dnsTargets = @($baseHost, $agentsHost, $script:LoginHost)
+    $dnsTargets = @($baseHost, $agentsHost, $Context.LoginHost)
     if ($proxyUri) { $dnsTargets += $proxyUri.Host }
     foreach ($dnsHost in @($dnsTargets | Select-Object -Unique)) {
         $addresses = $null
@@ -396,8 +509,8 @@ if ($SkipNetworkChecks) {
         -Remediation 'Allow outbound TCP 443 to the Intune endpoints directly or through the configured connector proxy.'
 
     $revocationUrls = @()
-    $script:net07ChainOk = $false
-    $script:net07RevocationProblem = $false
+    $net07ChainOk = $false
+    $net07RevocationProblem = $false
     if ($tlsConnection.Ok -and $tlsConnection.Stream) {
         $script:capturedCertificateBytes = $null
         $script:capturedPolicyErrors = [Net.Security.SslPolicyErrors]::None
@@ -432,8 +545,8 @@ if ($SkipNetworkChecks) {
             if (-not $chainStatus) { $chainStatus = 'OK' }
             $nameMismatch = ($script:capturedPolicyErrors -band [Net.Security.SslPolicyErrors]::RemoteCertificateNameMismatch) -ne 0
             $trusted = $chainBuilt -and -not $nameMismatch
-            $script:net07ChainOk = $trusted
-            $script:net07RevocationProblem = $chainStatus -match 'Revocation|Offline'
+            $net07ChainOk = $trusted
+            $net07RevocationProblem = $chainStatus -match 'Revocation|Offline'
 
             foreach ($chainElement in $chain.ChainElements) {
                 foreach ($extension in $chainElement.Certificate.Extensions) {
@@ -505,13 +618,13 @@ if ($SkipNetworkChecks) {
         }
         $revocationStatus = if ($unreachableRevocationHosts.Count -eq 0) {
             'Pass'
-        } elseif ($script:net07ChainOk -and -not $script:net07RevocationProblem) {
+        } elseif ($net07ChainOk -and -not $net07RevocationProblem) {
             'Warn'
         } else {
             'Fail'
         }
         Add-Result -Id 'NET08' -Category Network -Name 'Live-chain CRL and OCSP hosts are reachable' -Status $revocationStatus -Case `
-            -Detail $(if ($unreachableRevocationHosts.Count -eq 0) { "Reachable=$($revocationHosts.Keys -join ', ')" } else { "Unreachable=$($unreachableRevocationHosts -join ', '); NET07ChainTrusted=$($script:net07ChainOk)" }) `
+            -Detail $(if ($unreachableRevocationHosts.Count -eq 0) { "Reachable=$($revocationHosts.Keys -join ', ')" } else { "Unreachable=$($unreachableRevocationHosts -join ', '); NET07ChainTrusted=$net07ChainOk" }) `
             -Remediation 'Permit the CRL/OCSP hosts extracted from the live chain. The connector enables online certificate revocation checking.'
     } else {
         Add-Result -Id 'NET08' -Category Network -Name 'Live-chain CRL and OCSP hosts are reachable' -Status 'Info' `
@@ -587,22 +700,23 @@ if ($SkipNetworkChecks) {
         -Remediation 'Allow trusted TLS 1.2 access to autoupdate.msappproxy.net on TCP 443 so the connector can update automatically.'
 }
 
-# ===========================================================================
-# Internal NDES endpoint behavior
-# ===========================================================================
+#endregion Network Prerequisites
+
+#region Internal NDES Endpoint
+
 if (-not $SkipNdesChecks) {
     Section 'Internal NDES endpoint behavior'
-    if ($script:NdesRoleKnown -and -not $script:NdesRoleInstalled) {
+    if ($Context.NdesRoleKnown -and -not $Context.NdesRoleInstalled) {
         Add-Result -Id 'NDES08' -Category NDES -Name 'Direct MSCEP URL is protected' -Status 'Info' -Detail 'NDES role is not installed; not applicable.'
         Add-Result -Id 'NDES09' -Category NDES -Name 'MSCEP GetCACaps response' -Status 'Info' -Detail 'NDES role is not installed; not applicable.'
-    } elseif (-not $script:NdesRoleKnown) {
+    } elseif (-not $Context.NdesRoleKnown) {
         Add-Result -Id 'NDES08' -Category NDES -Name 'Direct MSCEP URL is protected' -Status 'Info' -Detail 'NDES role state is unknown; endpoint request skipped.'
         Add-Result -Id 'NDES09' -Category NDES -Name 'MSCEP GetCACaps response' -Status 'Info' -Detail 'NDES role state is unknown; endpoint request skipped.'
     } elseif ($SkipNetworkChecks) {
         Add-Result -Id 'NDES08' -Category NDES -Name 'Direct MSCEP URL is protected' -Status 'Info' -Detail 'Skipped with -SkipNetworkChecks.'
         Add-Result -Id 'NDES09' -Category NDES -Name 'MSCEP GetCACaps response' -Status 'Info' -Detail 'Skipped with -SkipNetworkChecks.'
     } else {
-        $ndesBaseUrl = "https://$script:Fqdn/certsrv/mscep/mscep.dll"
+        $ndesBaseUrl = "https://$($Context.Fqdn)/certsrv/mscep/mscep.dll"
         $directNdesResponse = Invoke-DiagnosticWebRequest -Uri $ndesBaseUrl -TimeoutSec $TimeoutSeconds -NoProxy
         $directStatus = if ($directNdesResponse.StatusCode -eq 403) {
             'Pass'
@@ -629,9 +743,10 @@ if (-not $SkipNdesChecks) {
     }
 }
 
-# ===========================================================================
-# Dynamic connector assembly validation
-# ===========================================================================
+#endregion Internal NDES Endpoint
+
+#region Dynamic Connector Assembly
+
 Section 'Dynamic connector assembly validation'
 if ($SkipDynamic) {
     Add-Result -Id 'DYN01' -Category Dynamic -Name 'ServiceLocatorClient via connector assembly' -Status 'Info' `
@@ -672,14 +787,13 @@ if ($SkipDynamic) {
     }
 }
 
+#endregion Dynamic Connector Assembly
+
 }
 
-function Section {
-    param([string]$Title)
+#endregion Diagnostic Phase Orchestration
 
-    Write-Line ''
-    Write-Line ("== {0} ==" -f $Title) 'White'
-}
+#region Configuration and Parsing
 
 function Get-Reg {
     param([string]$Path, [string]$Name)
@@ -774,6 +888,25 @@ function Resolve-ConnectorProxyUri {
     return $result
 }
 
+function Get-ConnectorProduct {
+    $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    try {
+        return Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -eq 'Certificate Connector for Microsoft Intune' } |
+            Sort-Object DisplayVersion -Descending |
+            Select-Object -First 1
+    } catch {
+        return $null
+    }
+}
+
+#endregion Configuration and Parsing
+
+#region System and Service Inspection
+
 function Get-FullyQualifiedHostName {
     try {
         return ([Net.Dns]::GetHostEntry($env:COMPUTERNAME)).HostName
@@ -828,6 +961,10 @@ function Get-ServiceDetail {
         StartedUtc = $started
     }
 }
+
+#endregion System and Service Inspection
+
+#region Account and Security Validation
 
 function Resolve-AccountSid {
     param([string]$AccountName)
@@ -931,6 +1068,10 @@ function Test-AccountUserRight {
 
     return $result
 }
+
+#endregion Account and Security Validation
+
+#region Certificate and Network Primitives
 
 function Get-CertificateTemplateName {
     param([Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
@@ -1082,20 +1223,9 @@ function Connect-Tls443 {
     return $result
 }
 
-function Get-ConnectorProduct {
-    $paths = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-    )
-    try {
-        return Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -eq 'Certificate Connector for Microsoft Intune' } |
-            Sort-Object DisplayVersion -Descending |
-            Select-Object -First 1
-    } catch {
-        return $null
-    }
-}
+#endregion Certificate and Network Primitives
+
+#region IIS, Event Log, and Collection Helpers
 
 function Get-IisScepConfiguration {
     $result = [pscustomobject]@{
@@ -1285,6 +1415,10 @@ function Initialize-DiagnosticCollection {
     }
 }
 
+#endregion IIS, Event Log, and Collection Helpers
+
+#region Public Command
+
 <#
 .SYNOPSIS
     Tests Microsoft Intune Certificate Connector and NDES prerequisites.
@@ -1392,18 +1526,28 @@ function Test-IntuneCertificateConnector {
         $script:Transcript = New-Object System.Collections.Generic.List[string]
         $script:BundleStage = $null
         $script:BundleTarget = $null
-        $script:LoginHost = $null
-        $script:Fqdn = $null
-        $script:NdesRoleKnown = $null
-        $script:NdesRoleInstalled = $null
-        $script:net07ChainOk = $false
-        $script:net07RevocationProblem = $false
         $script:capturedCertificateBytes = $null
         $script:capturedPolicyErrors = $null
 
-# ===========================================================================
-# Start and dynamic configuration discovery
-# ===========================================================================
+        $context = Initialize-DiagnosticContext `
+            -ConnectorType $ConnectorType `
+            -BaseAddress $BaseAddress `
+            -OutFile $OutFile `
+            -SkipDynamic:$SkipDynamic `
+            -SkipNdesChecks:$SkipNdesChecks `
+            -SkipNetworkChecks:$SkipNetworkChecks `
+            -SkipEventLogChecks:$SkipEventLogChecks `
+            -TimeoutSeconds $TimeoutSeconds `
+            -EventLookbackDays $EventLookbackDays `
+            -MaxEvents $MaxEvents `
+            -ConnectorStaleHours $ConnectorStaleHours `
+            -CollectLogs:$CollectLogs `
+            -DiagnosticBundlePath $DiagnosticBundlePath `
+            -IisLogCount $IisLogCount `
+            -PassThru:$PassThru
+
+    #region Phase 1 - Configuration Discovery
+
 Write-Line ''
 Write-Line '===============================================================================' 'White'
 Write-Line ' Intune Certificate Connector + NDES complete pre-flight diagnostic' 'White'
@@ -1434,12 +1578,25 @@ $baseUri = $null
 try { $baseUri = [Uri]$BaseAddress } catch {}
 $baseHost = if ($baseUri -and $baseUri.IsAbsoluteUri) { $baseUri.Host } else { 'manage.microsoft.com' }
 $agentsHost = "agents.$baseHost"
-$script:LoginHost = 'login.microsoftonline.com'
 $locationUrl = "https://$agentsHost/RestUserAuthLocationService/RestUserAuthLocationService/Certificate/ServiceAddresses"
-$script:Fqdn = Get-FullyQualifiedHostName
+$fqdn = Get-FullyQualifiedHostName
 $product = Get-ConnectorProduct
 $proxyResolution = Resolve-ConnectorProxyUri -Server $proxyServer -Port $proxyPort
 $proxyUri = if ($proxyResolution.Valid) { $proxyResolution.Uri } else { $null }
+
+$context.BaseAddress = $BaseAddress
+$context.ConnKey = $connKey
+$context.InstallFolder = $installFolder
+$context.BaseHost = $baseHost
+$context.AgentsHost = $agentsHost
+$context.LocationUrl = $locationUrl
+$context.Fqdn = $fqdn
+$context.ProxyServer = $proxyServer
+$context.ProxyPort = $proxyPort
+$context.ProxyUser = $proxyUser
+$context.ProxyResolution = $proxyResolution
+$context.ProxyUri = $proxyUri
+$context.Product = $product
 
 Add-Result -Id 'CFG01' -Category Config -Name 'Connector installation discovered' `
     -Status $(if ($installFolder -or $product) { 'Pass' } else { 'Warn' }) `
@@ -1459,9 +1616,10 @@ if ($issueDetails) {
 Add-Result -Id 'CFG06' -Category Config -Name 'Connector proxy configuration' -Status 'Info' `
     -Detail $(if ($proxyServer) { "ProxyServer=$proxyServer; Port=$proxyPort; UsernameConfigured=$(-not [string]::IsNullOrEmpty($proxyUser)); Parsed=$($proxyResolution.Candidate)" } else { 'No connector proxy configured; direct internet access is expected.' })
 
-# ===========================================================================
-# Local prerequisites
-# ===========================================================================
+    #endregion Phase 1 - Configuration Discovery
+
+    #region Phase 2 - Local Prerequisites
+
 Section 'Local prerequisites'
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -1614,9 +1772,16 @@ try {
 Add-Result -Id 'LOC09' -Category Local -Name 'Operating system last boot time' -Status 'Info' `
     -Detail $(if ($lastBootUtc) { "LastBootUtc=$($lastBootUtc.ToString('u'))" } else { 'Last boot time could not be read.' })
 
-# ===========================================================================
-# Certificate Connector configuration and health
-# ===========================================================================
+$context.ClientCert = $clientCert
+$context.ConnectorServiceNames = $connectorServiceNames
+$context.ConnectorServices = $connectorServices
+$context.ServiceSummary = $serviceSummary
+$context.OperatingSystemVersion = $os
+
+    #endregion Phase 2 - Local Prerequisites
+
+    #region Phase 3 - Connector Health
+
 Section 'Certificate Connector configuration and health'
 
 Add-Result -Id 'CON01' -Category Connector -Name 'Installed product details' `
@@ -1687,9 +1852,10 @@ if ($lastConn -and -not $lastConnectionUtc) {
         -Detail 'LastConnectionTime is not configured; the connector may not have completed enrollment.'
 }
 
-# ===========================================================================
-# NDES, roles, IIS, accounts, registry, and certificates
-# ===========================================================================
+    #endregion Phase 3 - Connector Health
+
+    #region Phase 4 - NDES, IIS, and Certificates
+
 if ($SkipNdesChecks) {
     Section 'NDES and IIS validation'
     Add-Result -Id 'NDES00' -Category NDES -Name 'NDES and IIS validation' -Status 'Info' -Detail 'Skipped with -SkipNdesChecks.'
@@ -1714,9 +1880,9 @@ if ($SkipNdesChecks) {
     $ndesFeature = $roleState.Features | Where-Object { $_.Name -eq 'ADCS-Device-Enrollment' } | Select-Object -First 1
     $caInstalled = $caFeature -and $caFeature.Installed
     $ndesInstalled = $ndesFeature -and $ndesFeature.Installed
-    $script:NdesRoleInstalled = [bool]$ndesInstalled
-    $script:NdesRoleKnown = $roleState.Available -and -not $roleState.Error
-    $roleStatus = if (-not $script:NdesRoleKnown) {
+    $context.NdesRoleInstalled = [bool]$ndesInstalled
+    $context.NdesRoleKnown = $roleState.Available -and -not $roleState.Error
+    $roleStatus = if (-not $context.NdesRoleKnown) {
         'Warn'
     } elseif ($ndesInstalled -and -not $caInstalled) {
         'Pass'
@@ -1779,11 +1945,11 @@ if ($SkipNdesChecks) {
         -Detail "ProviderRegistryPathPresent=$strongProviderPresent" `
         -Remediation 'This is an availability heuristic, not proof of the provider selected during NDES setup. Review NDES cryptography configuration if absent.'
 
-    if ($script:NdesRoleKnown -and -not $script:NdesRoleInstalled) {
+    if ($context.NdesRoleKnown -and -not $context.NdesRoleInstalled) {
         Section 'IIS and NDES service account'
         Add-Result -Id 'IIS00' -Category IIS -Name 'NDES-specific IIS and account checks' -Status 'Info' `
             -Detail 'NDES role is not installed; SCEP application-pool, account, MSCEP, and NDES certificate checks are not applicable.'
-    } elseif (-not $script:NdesRoleKnown) {
+    } elseif (-not $context.NdesRoleKnown) {
         Section 'IIS and NDES service account'
         Add-Result -Id 'IIS00' -Category IIS -Name 'NDES-specific IIS and account checks' -Status 'Warn' `
             -Detail 'NDES role state could not be determined; NDES-specific IIS and certificate checks were skipped.' `
@@ -1910,7 +2076,7 @@ if ($SkipNdesChecks) {
             $dnsName = $certificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::DnsName, $false)
             $serverAuth = @($certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | ForEach-Object { $_.Format($false) }) -join ';'
             $ekuOk = -not $serverAuth -or $serverAuth -match '1\.3\.6\.1\.5\.5\.7\.3\.1|Server Authentication'
-            $nameOk = Test-DnsNameMatch -Expected $script:Fqdn -Presented $dnsName
+            $nameOk = Test-DnsNameMatch -Expected $context.Fqdn -Presented $dnsName
             $timeOk = $certificate.NotBefore -le (Get-Date) -and $certificate.NotAfter -gt (Get-Date)
             if ($timeOk -and $certificate.HasPrivateKey -and $ekuOk -and $nameOk) { $usableBinding = $item }
             $bindingDetails += "Binding=$($item.Binding), Subject=$($certificate.Subject), DNS=$dnsName, NotAfter=$($certificate.NotAfter.ToUniversalTime().ToString('u')), PrivateKey=$($certificate.HasPrivateKey), ServerAuth=$ekuOk, NameMatch=$nameOk"
@@ -1923,8 +2089,19 @@ if ($SkipNdesChecks) {
     }
 }
 
-Invoke-NetworkAndDynamicValidation
-Invoke-Finalization
+    #endregion Phase 4 - NDES, IIS, and Certificates
+
+    #region Phase 5 - Network and Dynamic Validation
+
+Invoke-NetworkAndDynamicValidation -Context $context
+
+    #endregion Phase 5 - Network and Dynamic Validation
+
+    #region Phase 6 - Event Logs, Evidence, and Summary
+
+Invoke-Finalization -Context $context
+
+    #endregion Phase 6 - Event Logs, Evidence, and Summary
     } finally {
         if ($script:BundleStage -and (Test-Path $script:BundleStage)) {
             Remove-Item -Path $script:BundleStage -Recurse -Force -ErrorAction SilentlyContinue
@@ -1933,6 +2110,12 @@ Invoke-Finalization
     }
 }
 
+#endregion Public Command
+
+#region Aliases and Exports
+
 Set-Alias -Name Test-CertConnectorPrereqNetwork -Value Test-IntuneCertificateConnector -Scope Script
 
 Export-ModuleMember -Function Test-IntuneCertificateConnector -Alias Test-CertConnectorPrereqNetwork
+
+#endregion Aliases and Exports

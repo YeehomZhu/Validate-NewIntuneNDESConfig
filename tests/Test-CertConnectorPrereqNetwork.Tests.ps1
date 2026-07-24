@@ -28,7 +28,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
     It 'contains a valid PowerShell Gallery module manifest' {
         $moduleInfo = Test-ModuleManifest -Path $manifestPath
         $moduleInfo.Name | Should -Be 'IntuneCertificateConnectorDiagnostics'
-        $moduleInfo.Version | Should -Be ([Version]'2.0.2')
+        $moduleInfo.Version | Should -Be ([Version]'2.1.0')
         $moduleInfo.Guid | Should -Not -Be ([Guid]::Empty)
         $moduleInfo.Author | Should -Not -BeNullOrEmpty
         $moduleInfo.Description | Should -Not -BeNullOrEmpty
@@ -99,6 +99,53 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
             )) {
             $content | Should -Match ([regex]::Escape($section))
         }
+    }
+
+    It 'organizes the implementation into balanced functional regions' {
+        $content = Get-Content -Path $modulePath -Raw
+        $regionNames = @(
+            'Module State and Constants',
+            'Output and Formatting',
+            'Configuration and Parsing',
+            'System and Service Inspection',
+            'Account and Security Validation',
+            'Certificate and Network Primitives',
+            'IIS, Event Log, and Collection Helpers',
+            'Diagnostic Phase Orchestration',
+            'Public Command',
+            'Aliases and Exports'
+        )
+
+        foreach ($regionName in $regionNames) {
+            $content | Should -Match ("(?m)^#region {0}\r?$" -f [regex]::Escape($regionName))
+            $content | Should -Match ("(?m)^#endregion {0}\r?$" -f [regex]::Escape($regionName))
+        }
+        [regex]::Matches($content, '(?m)^\s*#region\b').Count |
+            Should -Be ([regex]::Matches($content, '(?m)^\s*#endregion\b').Count)
+    }
+
+    It 'uses an explicit diagnostic context for orchestration dependencies' {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $modulePath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        foreach ($functionName in @('Invoke-NetworkAndDynamicValidation', 'Invoke-Finalization')) {
+            $functionAst = $ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq $functionName
+                }, $true) | Select-Object -First 1
+            $functionAst | Should -Not -BeNullOrEmpty
+            @($functionAst.Body.ParamBlock.Parameters.Name.VariablePath.UserPath) |
+                Should -Contain 'Context'
+        }
+        $content = Get-Content -Path $modulePath -Raw
+        $content | Should -Match 'function Initialize-DiagnosticContext'
+        $content | Should -Match 'Invoke-NetworkAndDynamicValidation -Context \$context'
+        $content | Should -Match 'Invoke-Finalization -Context \$context'
     }
 
     It 'builds a clean Gallery module folder' {

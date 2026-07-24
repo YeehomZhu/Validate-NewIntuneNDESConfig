@@ -205,6 +205,12 @@ Some remote facts cannot be reliably validated from the local server and remain 
 
 The module exports only `Test-IntuneCertificateConnector` and the compatibility alias. All helper functions remain private.
 
+### Internal architecture
+
+The self-contained PSM1 is organized into foldable regions for module state, output formatting, configuration parsing, system/service inspection, account/security validation, certificate/network primitives, IIS/event/collection helpers, diagnostic orchestration, the public command, and exports.
+
+Each invocation creates a private diagnostic context that carries command options and cross-phase discoveries such as endpoints, proxy settings, connector services, certificates, and NDES role state. Network and finalization orchestration receive this context explicitly instead of relying on implicit access to the public command's local variables. Module-scoped state is limited to the active-run guard, result/transcript buffers, diagnostic-bundle staging, and TLS callback capture data.
+
 ## PowerShell Gallery publication
 
 The `.psd1` manifest contains version, GUID, author, description, license, project URL, tags, release notes, and explicit exports. Validate the module before publishing:
@@ -252,6 +258,7 @@ Special thanks to **Jerry Abouelnasr** for providing the new idea that inspired 
 
 | Version | Notes |
 |---------|-------|
+| 2.1.0 | Reorganized the PSM1 into functional regions and introduced explicit per-run diagnostic context without changing the public API or result IDs |
 | 2.0.2 | Reformatted the Gallery main description as a multiline numbered Quick Start |
 | 2.0.1 | Updated package attribution; added detailed usage steps and an acknowledgement for the feature-detection idea |
 | 2.0.0 | Merged NDES and Certificate Connector validation into one import-safe, non-interactive, Gallery-ready module |
