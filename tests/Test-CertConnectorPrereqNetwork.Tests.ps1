@@ -30,7 +30,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
         $moduleInfo.Name | Should -Be 'IntuneCertificateConnectorDiagnostics'
         $moduleInfo.Version | Should -Be ([Version]'2.1.0')
         $moduleInfo.Guid | Should -Not -Be ([Guid]::Empty)
-        $moduleInfo.Author | Should -Not -BeNullOrEmpty
+        $moduleInfo.Author | Should -Be 'Leon Zhu, Jerry Abouelnasr'
         $moduleInfo.Description | Should -Not -BeNullOrEmpty
         $moduleInfo.PrivateData.PSData.LicenseUri | Should -Not -BeNullOrEmpty
     }
@@ -50,6 +50,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
         }
         $readme | Should -Match 'Special thanks to \*\*Jerry Abouelnasr\*\*'
         $readme | Should -Match 'feature-detection capability'
+        $readme | Should -Match '(?m)^- Jerry Abouelnasr\r?$'
     }
 
     It 'uses PSResourceGet for Gallery publication' {

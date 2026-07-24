@@ -2,7 +2,7 @@
     RootModule        = 'IntuneCertificateConnectorDiagnostics.psm1'
     ModuleVersion     = '2.1.0'
     GUID              = 'bb2983e7-ce6b-4ffe-9a20-84f1c8ed502c'
-    Author            = 'Leon Zhu'
+    Author            = 'Leon Zhu, Jerry Abouelnasr'
     CompanyName       = ''
     Copyright         = 'Copyright (c) 2026 Leon Zhu. Licensed under the MIT License.'
     Description       = @'
@@ -54,6 +54,7 @@ Acknowledgement: Thanks to Jerry Abouelnasr for the feature-detection idea.
             ProjectUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig'
             ReleaseNotes = @'
 Version 2.1.0:
+- Adds Jerry Abouelnasr as a module co-author.
 - Reorganizes the PSM1 into foldable functional and diagnostic-phase regions.
 - Introduces an explicit per-run diagnostic context for cross-phase settings and
     removes implicit parameter lookup from network and finalization orchestration.
