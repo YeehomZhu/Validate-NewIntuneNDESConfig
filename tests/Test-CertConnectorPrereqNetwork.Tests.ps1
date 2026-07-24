@@ -148,6 +148,37 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
         $content | Should -Match 'Invoke-Finalization -Context \$context'
     }
 
+    It 'documents the responsibility of every function' {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $modulePath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $sourceLines = @(Get-Content -Path $modulePath)
+        $functions = @($ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+                }, $true))
+
+        foreach ($function in $functions) {
+            $precedingIndex = $function.Extent.StartLineNumber - 2
+            $precedingLine = $sourceLines[$precedingIndex].Trim()
+            if ($precedingLine -eq '#>') {
+                $helpStart = $precedingIndex
+                while ($helpStart -ge 0 -and $sourceLines[$helpStart].Trim() -ne '<#') {
+                    $helpStart--
+                }
+                $helpText = $sourceLines[$helpStart..$precedingIndex] -join "`n"
+                $helpText | Should -Match '\.SYNOPSIS'
+            } else {
+                $precedingLine | Should -Match '^#\s+\S'
+                $precedingLine | Should -Not -Match '^#(end)?region\b'
+            }
+        }
+    }
+
     It 'builds a clean Gallery module folder' {
         $packagePath = & $buildPath -OutputRoot $TestDrive
         $packagePath | Should -Be (Join-Path $TestDrive 'IntuneCertificateConnectorDiagnostics')

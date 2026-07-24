@@ -18,6 +18,8 @@ $script:EventLogNames = @(
     'System'
 )
 
+# Creates the per-invocation context that carries command options and values
+# discovered by one diagnostic phase for use by later phases.
 function Initialize-DiagnosticContext {
     param(
         [string]$ConnectorType,
@@ -80,6 +82,7 @@ function Initialize-DiagnosticContext {
 
 #region Output and Formatting
 
+# Writes a colorized console line and appends the same text to the transcript.
 function Write-Line {
     param([AllowEmptyString()] [string]$Text, [string]$Color = 'Gray')
 
@@ -87,6 +90,8 @@ function Write-Line {
     Write-Host $Text -ForegroundColor $Color
 }
 
+# Creates one structured check result, rejects duplicate IDs, stores the result,
+# and renders its status, detail, and remediation to the console transcript.
 function Add-Result {
     param(
         [Parameter(Mandatory = $true)] [string]$Id,
@@ -140,6 +145,7 @@ function Add-Result {
     }
 }
 
+# Writes a consistently formatted heading that separates diagnostic sections.
 function Section {
     param([string]$Title)
 
@@ -151,6 +157,8 @@ function Section {
 
 #region Diagnostic Phase Orchestration
 
+# Runs event-log checks and optional evidence collection, calculates the final
+# status, writes the transcript/bundle, and optionally returns the report object.
 function Invoke-Finalization {
     param(
         [Parameter(Mandatory = $true)]
@@ -417,6 +425,8 @@ if ($PassThru) {
 
 }
 
+# Runs proxy, DNS, transport, TLS, revocation, service-locator, updater, internal
+# NDES endpoint, and installed connector-assembly validation from explicit context.
 function Invoke-NetworkAndDynamicValidation {
     param(
         [Parameter(Mandatory = $true)]
@@ -795,6 +805,7 @@ if ($SkipDynamic) {
 
 #region Configuration and Parsing
 
+# Reads one named value from an HKLM registry path and returns null when unavailable.
 function Get-Reg {
     param([string]$Path, [string]$Name)
 
@@ -806,6 +817,8 @@ function Get-Reg {
     }
 }
 
+# Normalizes registry or object date values to UTC, including DateTimeOffset,
+# DateTime, Windows file time, current-culture text, and invariant-culture text.
 function ConvertTo-UtcDateTime {
     param($Value)
 
@@ -847,6 +860,8 @@ function ConvertTo-UtcDateTime {
     return $null
 }
 
+# Validates the connector proxy configuration and returns a normalized URI plus
+# configured/valid/error metadata without throwing for malformed user settings.
 function Resolve-ConnectorProxyUri {
     param([string]$Server, $Port)
 
@@ -888,6 +903,8 @@ function Resolve-ConnectorProxyUri {
     return $result
 }
 
+# Finds the installed Certificate Connector product record in both uninstall
+# registry views and returns the highest discovered display version.
 function Get-ConnectorProduct {
     $paths = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -907,6 +924,8 @@ function Get-ConnectorProduct {
 
 #region System and Service Inspection
 
+# Resolves the local computer's fully qualified DNS hostname with a safe fallback
+# to the short COMPUTERNAME value when DNS lookup is unavailable.
 function Get-FullyQualifiedHostName {
     try {
         return ([Net.Dns]::GetHostEntry($env:COMPUTERNAME)).HostName
@@ -915,6 +934,8 @@ function Get-FullyQualifiedHostName {
     }
 }
 
+# Queries requested Windows Server roles/features and returns availability,
+# feature objects, and any query error in a consistent result object.
 function Get-WindowsFeatureState {
     param([string[]]$Names)
 
@@ -931,6 +952,8 @@ function Get-WindowsFeatureState {
     }
 }
 
+# Returns a service's status, startup identity/mode, process ID, and most recent
+# process start time by combining ServiceController and CIM information.
 function Get-ServiceDetail {
     param([string]$Name)
 
@@ -966,6 +989,8 @@ function Get-ServiceDetail {
 
 #region Account and Security Validation
 
+# Resolves a Windows account name to its security identifier (SID), returning
+# null when the account cannot be translated in the current environment.
 function Resolve-AccountSid {
     param([string]$AccountName)
 
@@ -981,6 +1006,8 @@ function Resolve-AccountSid {
     }
 }
 
+# Tests whether an account SID is a member of a localized built-in group by using
+# the group's well-known SID and ADSI member enumeration.
 function Test-LocalGroupMembershipBySid {
     param([string]$AccountName, [string]$GroupSid)
 
@@ -1027,6 +1054,8 @@ function Test-LocalGroupMembershipBySid {
     return $output
 }
 
+# Exports local user-right assignments with secedit and checks whether the target
+# account SID holds a requested right such as Log on as a service.
 function Test-AccountUserRight {
     param([string]$AccountName, [string]$Right = 'SeServiceLogonRight')
 
@@ -1073,6 +1102,8 @@ function Test-AccountUserRight {
 
 #region Certificate and Network Primitives
 
+# Extracts certificate-template names from Microsoft template extension OIDs and
+# returns a unique list suitable for NDES certificate matching.
 function Get-CertificateTemplateName {
     param([Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
 
@@ -1105,6 +1136,8 @@ function Get-CertificateTemplateName {
     return @($names | Where-Object { $_ } | Select-Object -Unique)
 }
 
+# Compares an expected DNS hostname with a presented certificate name, including
+# single-label wildcard certificate matching.
 function Test-DnsNameMatch {
     param([string]$Expected, [string]$Presented)
 
@@ -1122,6 +1155,8 @@ function Test-DnsNameMatch {
     return $false
 }
 
+# Performs a bounded diagnostic HTTP GET and returns status, content, and error
+# details while optionally bypassing the system proxy for internal NDES requests.
 function Invoke-DiagnosticWebRequest {
     param(
         [string]$Uri,
@@ -1167,6 +1202,8 @@ function Invoke-DiagnosticWebRequest {
 # Network primitive: direct TCP or an HTTP CONNECT tunnel through the exact
 # proxy configured by the connector. Returns Ok, Stream, Tcp, ProxyStatus, Error.
 # ---------------------------------------------------------------------------
+# Opens a direct TCP connection or an HTTP CONNECT proxy tunnel and returns the
+# live stream/socket plus proxy status and error information for TLS validation.
 function Connect-Tls443 {
     param(
         [string]$TargetHost,
@@ -1227,6 +1264,8 @@ function Connect-Tls443 {
 
 #region IIS, Event Log, and Collection Helpers
 
+# Discovers the SCEP application pool, process-model identity, state, and HTTPS
+# bindings through WebAdministration with an appcmd.exe fallback.
 function Get-IisScepConfiguration {
     $result = [pscustomobject]@{
         Available       = $false
@@ -1273,6 +1312,8 @@ function Get-IisScepConfiguration {
     return $result
 }
 
+# Converts an IIS application-pool identity type and optional configured username
+# into the effective Windows account used by the SCEP pool.
 function Get-AppPoolAccountName {
     param($IisConfiguration)
 
@@ -1292,6 +1333,8 @@ function Get-AppPoolAccountName {
     }
 }
 
+# Formats recent event records into compact, single-line diagnostic summaries and
+# truncates long event messages for readable console and transcript output.
 function Format-EventSummary {
     param([object[]]$Events)
 
@@ -1304,6 +1347,7 @@ function Format-EventSummary {
     return ($parts -join ' | ')
 }
 
+# Reports whether a named Windows event-log channel is registered and accessible.
 function Test-EventLog {
     param([string]$LogName)
 
@@ -1315,6 +1359,8 @@ function Test-EventLog {
     }
 }
 
+# Stages metadata, recent IIS logs, exported EVTX files, and GPResult output, then
+# returns the staging/target paths and warnings needed for final ZIP creation.
 function Initialize-DiagnosticCollection {
     param([string]$RequestedPath, [int]$RecentIisLogCount)
 
