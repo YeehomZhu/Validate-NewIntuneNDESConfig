@@ -16,6 +16,27 @@ Since Microsoft Intune released the new Certificate Connector for SCEP certifica
 
 > **Note:** This script is used **purely to validate** the configuration. All remedial tasks will need to be carried out manually.
 
+### Why this module exists
+
+The connector setup wizard primarily validates local prerequisites. It doesn't prove that the service can complete the outbound Intune service-locator call it performs synchronously during startup. A broken proxy, blocked endpoint, TLS inspection, missing root, inaccessible CRL/OCSP responder, disabled TLS 1.2, or clock skew can therefore surface later as a service startup delay or Win32 1056 instead of a clear setup-time network error. PKCS/PFX-only configurations also don't benefit from SCEP-specific local prerequisite checks.
+
+This module fills that gap by actively exercising the connector's discovered network path and returning a separate status, observed detail, and remediation for each check.
+
+### Service-locator validation fidelity
+
+The module derives the endpoint from the connector's registry configuration and tests:
+
+- URI: `https://agents.<base>/RestUserAuthLocationService/RestUserAuthLocationService/Certificate/ServiceAddresses`
+- Client certificate: the configured agent/channel-encryption certificate when available
+- Proxy: the connector's configured `ProxyServer` and `Port`
+- TLS: TLS 1.2, hostname validation, server-certificate chain trust, and TLS-interception heuristic
+- Revocation: online chain validation plus CRL/OCSP hosts extracted from the live server chain
+- Required services: `EnrollmentService` and `RAODJPlusFEGatewayService`
+
+`NET09` performs the static HTTP equivalent with revocation enabled. It passes full validation only when an agent certificate is presented, the request succeeds, and both required service names are present. Without the certificate, it reports a warning and treats the result as transport/TLS validation only. `DYN01` provides the highest-fidelity path by loading the installed `Microsoft.Management.Services.ConnectorCommon.dll`, invoking `RetrieveServiceLocations()`, and requiring both service-map keys to resolve to absolute endpoint URIs.
+
+The number of emitted checks is intentionally not fixed. It varies with discovered DNS hosts, connector service accounts, installed roles/features, and skip parameters.
+
 ## Combined diagnostic features
 
 - ✅ Windows Server, administrator, .NET Framework 4.7.2, TLS 1.2, system clock, and trusted-root checks
@@ -26,6 +47,7 @@ Since Microsoft Intune released the new Certificate Connector for SCEP certifica
 - ✅ Connector installation, version, features, services, client certificate, proxy, and last connection
 - ✅ Dynamic DNS, TCP, HTTP CONNECT, TLS, hostname, chain trust, TLS inspection, and CRL/OCSP checks
 - ✅ Connector service-locator call using both `HttpClient` and the installed connector assembly
+- ✅ Required service discovery for `EnrollmentService` and `RAODJPlusFEGatewayService`
 - ✅ Proxy-aware Azure update service validation for `autoupdate.msappproxy.net:443`
 - ✅ Internal MSCEP direct-access and `GetCACaps` behavior
 - ✅ Bounded recent-event analysis for Connector Admin/Operational, updater, Application, and System logs
@@ -159,6 +181,7 @@ The report includes overall status, execution time, transcript and bundle paths,
 | Intune Connector | Installed |
 | Connector Certificate | Present and not expired |
 | Connector Last Sync | Within the last 1 day |
+| Service Locator | Authenticated response resolves `EnrollmentService` and `RAODJPlusFEGatewayService` |
 | Internal NDES URL | Returns HTTP 403 |
 | Azure Update Endpoint | TCP 443 reachable |
 
@@ -194,6 +217,8 @@ When `CollectLogs` is specified, the ZIP can contain:
 The combined diagnostic is read-only with respect to server configuration. It doesn't install roles, write registry settings, restart services, remove certificates, or apply remediation. Its normal side effect is writing the transcript. A ZIP and temporary staging files are created only with `CollectLogs`; the staging directory is removed after packaging.
 
 Some remote facts cannot be reliably validated from the local server and remain manual checks, including certificate-template ACLs on the issuing CA, `Issue and Manage Certificates`, KSP permissions for imported PFX, Microsoft Entra role/license assignment, and environment-dependent SPN requirements.
+
+The module uses best-effort error handling for environmental probes. An unexpected runtime problem is converted into a `RUN01` failure result and fallback transcript instead of terminating the diagnostic. A concurrent invocation in the same module session is still rejected to protect shared run-state integrity. Without an enrolled agent certificate, the module can validate proxy, DNS, TCP, TLS, trust, and HTTP reachability, but it reports the ServiceAddresses request as transport-only rather than claiming a complete authenticated connector call.
 
 ## Module layout
 
@@ -259,6 +284,7 @@ Special thanks to **Jerry Abouelnasr** for providing the new idea that inspired 
 
 | Version | Notes |
 |---------|-------|
+| 2.2.0 | Tightened authenticated ServiceAddresses and service-map validation; added defensive RUN01 fallback reporting |
 | 2.1.0 | Added Jerry Abouelnasr as co-author; reorganized the PSM1 into functional regions and introduced explicit per-run diagnostic context without changing the public API or result IDs |
 | 2.0.2 | Reformatted the Gallery main description as a multiline numbered Quick Start |
 | 2.0.1 | Updated package attribution; added detailed usage steps and an acknowledgement for the feature-detection idea |

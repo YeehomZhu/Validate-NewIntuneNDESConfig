@@ -17,6 +17,10 @@ $script:EventLogNames = @(
     'Application',
     'System'
 )
+$script:RequiredServiceNames = @(
+    'EnrollmentService'
+    'RAODJPlusFEGatewayService'
+)
 
 # Creates the per-invocation context that carries command options and values
 # discovered by one diagnostic phase for use by later phases.
@@ -156,6 +160,80 @@ function Section {
 #endregion Output and Formatting
 
 #region Diagnostic Phase Orchestration
+
+# Converts an unexpected phase exception into a structured RUN01 failure,
+# persists a fallback transcript, and returns the normal report schema when requested.
+function Complete-UnhandledDiagnosticFailure {
+    param(
+        [psobject]$Context,
+        [Management.Automation.ErrorRecord]$ErrorRecord,
+        [bool]$PassThru,
+        [string]$RequestedOutFile
+    )
+
+    if ($null -eq $script:Results) {
+        $script:Results = New-Object System.Collections.Generic.List[object]
+    }
+    if ($null -eq $script:Transcript) {
+        $script:Transcript = New-Object System.Collections.Generic.List[string]
+    }
+
+    $exception = $ErrorRecord.Exception
+    $detail = if ($exception) {
+        "Unexpected $($exception.GetType().FullName): $($exception.Message)"
+    } else {
+        "Unexpected diagnostic failure: $ErrorRecord"
+    }
+    if (-not ($script:Results | Where-Object Id -eq 'RUN01')) {
+        Add-Result -Id 'RUN01' -Category Local -Name 'Unexpected diagnostic runtime failure' -Status 'Fail' `
+            -Detail $detail `
+            -Remediation 'Review the transcript, rerun from an elevated Windows PowerShell session, and report the RUN01 detail if the failure persists.'
+    }
+
+    $outFile = if ($Context -and $Context.OutFile) { $Context.OutFile } else { $RequestedOutFile }
+    if (-not $outFile) {
+        $fallbackDirectory = Join-Path ([IO.Path]::GetTempPath()) 'IntuneCertificateConnectorDiagnostics'
+        try { $null = New-Item -ItemType Directory -Path $fallbackDirectory -Force -ErrorAction Stop } catch {}
+        $outFile = Join-Path $fallbackDirectory ("UnexpectedFailure-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
+    }
+    Write-Line "  OVERALL: FAIL (RUN01)" 'Red'
+    Write-Line "  Transcript target: $outFile" 'Cyan'
+    try {
+        $fallbackHeader = @(
+            'Intune Certificate Connector and NDES diagnostic - unexpected failure',
+            "Host=$env:COMPUTERNAME Date=$(Get-Date -Format o)",
+            $detail,
+            ''
+        )
+        Set-Content -Path $outFile -Value ($fallbackHeader + $script:Transcript) -Encoding UTF8 -ErrorAction Stop
+    } catch {}
+
+    if ($PassThru) {
+        $completedAtUtc = (Get-Date).ToUniversalTime()
+        $startedAtUtc = if ($script:StartedAtUtc) { $script:StartedAtUtc } else { $completedAtUtc }
+        $passes = @($script:Results | Where-Object Status -eq 'Pass')
+        $warnings = @($script:Results | Where-Object Status -eq 'Warn')
+        $failures = @($script:Results | Where-Object Status -eq 'Fail')
+        $information = @($script:Results | Where-Object Status -eq 'Info')
+        Write-Output ([pscustomobject]@{
+                PSTypeName           = 'Intune.CertificateConnector.DiagnosticReport'
+                Overall              = 'FAIL'
+                ComputerName         = $env:COMPUTERNAME
+                GeneratedAtUtc       = $completedAtUtc
+                Duration             = $completedAtUtc - $startedAtUtc
+                Counts               = [pscustomobject]@{
+                    Pass  = $passes.Count
+                    Warn  = $warnings.Count
+                    Fail  = $failures.Count
+                    Info  = $information.Count
+                    Total = $script:Results.Count
+                }
+                TranscriptPath       = $outFile
+                DiagnosticBundlePath = $null
+                Results              = $script:Results.ToArray()
+            })
+    }
+}
 
 # Runs event-log checks and optional evidence collection, calculates the final
 # status, writes the transcript/bundle, and optionally returns the report object.
@@ -659,13 +737,29 @@ if ($SkipNetworkChecks) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $httpClient = New-Object Net.Http.HttpClient($httpHandler)
         $httpClient.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
+        $locationResponse = $null
         try {
             $locationResponse = $httpClient.GetAsync($locationUrl).GetAwaiter().GetResult()
             $locationStatus = [int]$locationResponse.StatusCode
+            $locationContent = $locationResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            $locationAssessment = Get-ServiceLocatorHttpAssessment `
+                -StatusCode $locationStatus `
+                -ClientCertificatePresented ($null -ne $clientCert) `
+                -Content $locationContent
+            $foundServiceText = if ($locationAssessment.FoundServices.Count) {
+                $locationAssessment.FoundServices -join ', '
+            } else {
+                '<none>'
+            }
+            $missingServiceText = if ($locationAssessment.MissingServices.Count) {
+                $locationAssessment.MissingServices -join ', '
+            } else {
+                '<none>'
+            }
             Add-Result -Id 'NET09' -Category Network -Name 'Connector service-locator HTTP call' `
-                -Status $(if ($locationStatus -ge 200 -and $locationStatus -lt 500) { 'Pass' } else { 'Warn' }) -Case `
-                -Detail "GET $locationUrl -> HTTP $locationStatus $($locationResponse.StatusCode)" `
-                -Remediation 'A 2xx, 401, or 403 response proves transport and trust. A 5xx response indicates a service-side problem.'
+                -Status $locationAssessment.Status -Case `
+                -Detail "GET $locationUrl -> HTTP $locationStatus $($locationResponse.StatusCode); ClientCertificate=$($locationAssessment.ClientCertificatePresented); FoundServices=$foundServiceText; MissingServices=$missingServiceText" `
+                -Remediation $locationAssessment.Remediation
         } catch {
             $exception = $_.Exception
             $inner = $exception
@@ -675,6 +769,7 @@ if ($SkipNetworkChecks) {
                 -Detail "GET $locationUrl failed: $($inner.GetType().Name): $($inner.Message)" `
                 -Remediation $(if ($trustFailure) { 'This matches the known TLS/trust incident. Review NET07, NET07b, NET08, LOC05, and LOC06.' } else { 'Resolve the connector proxy or endpoint connectivity failure.' })
         } finally {
+            if ($locationResponse) { $locationResponse.Dispose() }
             $httpClient.Dispose()
             $httpHandler.Dispose()
         }
@@ -766,7 +861,7 @@ if ($SkipDynamic) {
         -Detail 'Skipped because -SkipNetworkChecks was specified.'
 } elseif (-not $installFolder) {
     Add-Result -Id 'DYN01' -Category Dynamic -Name 'ServiceLocatorClient via connector assembly' -Status 'Info' `
-        -Detail 'InstallFolder is unknown; NET09 exercised the equivalent static call.'
+        -Detail $(if ($clientCert) { 'InstallFolder is unknown; NET09 exercised the authenticated static equivalent.' } else { 'InstallFolder and agent certificate are unavailable; NET09 validated transport and TLS only.' })
 } else {
     $connectorCommonDll = Join-Path $installFolder 'Microsoft.Management.Services.ConnectorCommon.dll'
     if (Test-Path $connectorCommonDll) {
@@ -777,11 +872,27 @@ if ($SkipDynamic) {
             if ($proxyUri) { $webProxy = New-Object Net.WebProxy($proxyUri, $false) }
             if ($clientCert) {
                 $serviceMap = $serviceLocatorClient.RetrieveServiceLocations($clientCert, $webProxy, [Uri]$locationUrl)
-                Add-Result -Id 'DYN01' -Category Dynamic -Name 'ServiceLocatorClient via connector assembly' -Status 'Pass' -Case `
-                    -Detail ("Connector assembly resolved {0} service endpoint(s): {1}" -f $serviceMap.Count, ($serviceMap.Keys -join ', '))
+                $serviceMapAssessment = Get-ServiceLocatorMapAssessment -ServiceMap $serviceMap
+                $missingServiceText = if ($serviceMapAssessment.MissingServices.Count) {
+                    $serviceMapAssessment.MissingServices -join ', '
+                } else {
+                    '<none>'
+                }
+                $invalidServiceText = if ($serviceMapAssessment.InvalidServices.Count) {
+                    $serviceMapAssessment.InvalidServices -join ', '
+                } else {
+                    '<none>'
+                }
+                $resolvedServiceText = @($serviceMapAssessment.ResolvedServices.GetEnumerator() | ForEach-Object {
+                        "$($_.Key)=$($_.Value)"
+                    }) -join '; '
+                Add-Result -Id 'DYN01' -Category Dynamic -Name 'ServiceLocatorClient via connector assembly' `
+                    -Status $(if ($serviceMapAssessment.Complete) { 'Pass' } else { 'Fail' }) -Case `
+                    -Detail ("Connector assembly returned {0} key(s): {1}; MissingServices={2}; InvalidServices={3}; ResolvedServices={4}" -f $serviceMapAssessment.Keys.Count, ($serviceMapAssessment.Keys -join ', '), $missingServiceText, $invalidServiceText, $resolvedServiceText) `
+                    -Remediation 'RetrieveServiceLocations must resolve valid EnrollmentService and RAODJPlusFEGatewayService endpoints. Re-enroll the connector or investigate Intune service discovery.'
             } else {
                 Add-Result -Id 'DYN01' -Category Dynamic -Name 'ServiceLocatorClient via connector assembly' -Status 'Info' `
-                    -Detail 'Assembly loaded, but no enrolled agent certificate is available. NET09 tested transport without it.'
+                    -Detail 'Assembly loaded, but no enrolled agent certificate is available. NET09 can validate only transport and TLS without it.'
             }
         } catch {
             $inner = $_.Exception
@@ -793,7 +904,7 @@ if ($SkipDynamic) {
         }
     } else {
         Add-Result -Id 'DYN01' -Category Dynamic -Name 'ServiceLocatorClient via connector assembly' -Status 'Info' `
-            -Detail "ConnectorCommon assembly was not found at $connectorCommonDll; NET09 covered the equivalent call."
+            -Detail $(if ($clientCert) { "ConnectorCommon assembly was not found at $connectorCommonDll; NET09 covered the authenticated static equivalent." } else { "ConnectorCommon assembly was not found at $connectorCommonDll and no agent certificate is available; NET09 validated transport and TLS only." })
     }
 }
 
@@ -1101,6 +1212,100 @@ function Test-AccountUserRight {
 #endregion Account and Security Validation
 
 #region Certificate and Network Primitives
+
+# Evaluates a ServiceAddresses HTTP response against the connector's required
+# services and distinguishes full client-certificate validation from transport-only validation.
+function Get-ServiceLocatorHttpAssessment {
+    param(
+        [int]$StatusCode,
+        [bool]$ClientCertificatePresented,
+        [AllowEmptyString()]
+        [string]$Content = ''
+    )
+
+    $foundServices = @($script:RequiredServiceNames | Where-Object {
+            $Content -match [regex]::Escape($_)
+        })
+    $missingServices = @($script:RequiredServiceNames | Where-Object {
+            $_ -notin $foundServices
+        })
+    $status = 'Warn'
+    $remediation = 'Review the unexpected HTTP response and the Intune service status.'
+
+    if ($StatusCode -ge 200 -and $StatusCode -lt 300) {
+        if (-not $ClientCertificatePresented) {
+            $status = 'Warn'
+            $remediation = 'Transport and TLS succeeded, but the exact authenticated connector call requires a valid agent encryption certificate.'
+        } elseif ($missingServices.Count -eq 0) {
+            $status = 'Pass'
+            $remediation = ''
+        } else {
+            $status = 'Fail'
+            $remediation = 'The ServiceAddresses response must include EnrollmentService and RAODJPlusFEGatewayService. Review connector enrollment and Intune service discovery.'
+        }
+    } elseif ($StatusCode -in @(401, 403)) {
+        if ($ClientCertificatePresented) {
+            $status = 'Fail'
+            $remediation = 'The endpoint rejected the enrolled agent certificate. Re-enroll the connector and verify its certificate and tenant registration.'
+        } else {
+            $status = 'Warn'
+            $remediation = 'The response proves transport and TLS trust, but authentication could not be validated without the agent certificate.'
+        }
+    } elseif ($StatusCode -ge 500) {
+        $status = 'Fail'
+        $remediation = 'The service locator returned a server-side error. Check Microsoft service health and retry after local connectivity is confirmed.'
+    }
+
+    return [pscustomobject]@{
+        Status                     = $status
+        ClientCertificatePresented = $ClientCertificatePresented
+        FoundServices              = $foundServices
+        MissingServices            = $missingServices
+        Remediation                = $remediation
+    }
+}
+
+# Validates that the connector assembly returned both required service-map keys
+# and that each key resolves to a non-empty absolute endpoint URI.
+function Get-ServiceLocatorMapAssessment {
+    param([object]$ServiceMap)
+
+    $keys = @()
+    if ($null -ne $ServiceMap -and $null -ne $ServiceMap.Keys) {
+        $keys = @($ServiceMap.Keys | ForEach-Object { [string]$_ })
+    }
+
+    $missingServices = @()
+    $invalidServices = @()
+    $resolvedServices = [ordered]@{}
+    foreach ($requiredService in $script:RequiredServiceNames) {
+        $matchingKey = $keys | Where-Object {
+            $_.Equals($requiredService, [StringComparison]::OrdinalIgnoreCase)
+        } | Select-Object -First 1
+        if (-not $matchingKey) {
+            $missingServices += $requiredService
+            continue
+        }
+
+        $endpointValue = $null
+        try { $endpointValue = $ServiceMap[$matchingKey] } catch {}
+        $endpointUri = $null
+        if ($null -eq $endpointValue -or
+            -not [Uri]::TryCreate([string]$endpointValue, [UriKind]::Absolute, [ref]$endpointUri)) {
+            $invalidServices += $requiredService
+            continue
+        }
+        $resolvedServices[$requiredService] = $endpointUri.AbsoluteUri
+    }
+
+    return [pscustomobject]@{
+        Complete         = $missingServices.Count -eq 0 -and $invalidServices.Count -eq 0
+        Keys             = $keys
+        MissingServices  = $missingServices
+        InvalidServices  = $invalidServices
+        ResolvedServices = $resolvedServices
+    }
+}
 
 # Extracts certificate-template names from Microsoft template extension OIDs and
 # returns a unique list suitable for NDES certificate matching.
@@ -2145,9 +2350,20 @@ Invoke-NetworkAndDynamicValidation -Context $context
 
     #region Phase 6 - Event Logs, Evidence, and Summary
 
-Invoke-Finalization -Context $context
+        Invoke-Finalization -Context $context
 
     #endregion Phase 6 - Event Logs, Evidence, and Summary
+    } catch {
+        $unhandledError = $_
+        try {
+            Complete-UnhandledDiagnosticFailure `
+                -Context $context `
+                -ErrorRecord $unhandledError `
+                -PassThru ([bool]$PassThru) `
+                -RequestedOutFile $OutFile
+        } catch {
+            Write-Warning "The diagnostic and its fallback reporter both failed: $($_.Exception.Message)"
+        }
     } finally {
         if ($script:BundleStage -and (Test-Path $script:BundleStage)) {
             Remove-Item -Path $script:BundleStage -Recurse -Force -ErrorAction SilentlyContinue

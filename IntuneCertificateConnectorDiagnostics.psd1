@@ -1,6 +1,6 @@
 @{
     RootModule        = 'IntuneCertificateConnectorDiagnostics.psm1'
-    ModuleVersion     = '2.1.0'
+    ModuleVersion     = '2.2.0'
     GUID              = 'bb2983e7-ce6b-4ffe-9a20-84f1c8ed502c'
     Author            = 'Leon Zhu, Jerry Abouelnasr'
     CompanyName       = ''
@@ -17,6 +17,8 @@ Quick start:
 6. Add -PassThru to return a structured report for automation.
 
 Checks cover Windows and IIS roles, service accounts, certificates, registry configuration, event logs, proxy, DNS, TLS trust, revocation, service-locator connectivity, and automatic updates.
+
+Full service-locator validation requires the enrolled agent certificate and verifies that EnrollmentService and RAODJPlusFEGatewayService resolve to absolute endpoint URIs.
 
 Acknowledgement: Thanks to Jerry Abouelnasr for the feature-detection idea.
 '@
@@ -53,16 +55,19 @@ Acknowledgement: Thanks to Jerry Abouelnasr for the feature-detection idea.
             LicenseUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig/blob/master/LICENSE'
             ProjectUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig'
             ReleaseNotes = @'
-Version 2.1.0:
-- Adds Jerry Abouelnasr as a module co-author.
-- Reorganizes the PSM1 into foldable functional and diagnostic-phase regions.
-- Introduces an explicit per-run diagnostic context for cross-phase settings and
-    removes implicit parameter lookup from network and finalization orchestration.
-- Reduces module-global state to runtime result, transcript, bundle, concurrency,
-    and TLS callback capture data.
-- Retains the acknowledgement to Jerry Abouelnasr for the feature-detection idea.
-- Keeps the public command, alias, parameters, result IDs, report schema, and
-    diagnostic behavior compatible with version 2.0.2.
+Version 2.2.0:
+- Tightens NET09 so only a successful client-certificate response containing
+    EnrollmentService and RAODJPlusFEGatewayService passes full validation.
+- Distinguishes transport-only validation when the agent certificate is absent.
+- Makes authentication rejection, missing service names, and HTTP 5xx responses
+    actionable failures while unexpected redirects and other 4xx responses warn.
+- Makes DYN01 validate both required service-map keys and absolute endpoint URIs
+    returned by the installed connector assembly.
+- Converts unexpected environmental/runtime exceptions into a RUN01 failure
+    report and fallback transcript instead of terminating the diagnostic.
+- Retains Jerry Abouelnasr as co-author and acknowledges his feature-detection idea.
+- Keeps the public command, alias, parameters, existing result IDs, and report
+    schema compatible; RUN01 is emitted only for an unexpected runtime failure.
 '@
         }
     }

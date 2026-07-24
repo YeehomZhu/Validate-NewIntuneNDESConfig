@@ -28,7 +28,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
     It 'contains a valid PowerShell Gallery module manifest' {
         $moduleInfo = Test-ModuleManifest -Path $manifestPath
         $moduleInfo.Name | Should -Be 'IntuneCertificateConnectorDiagnostics'
-        $moduleInfo.Version | Should -Be ([Version]'2.1.0')
+        $moduleInfo.Version | Should -Be ([Version]'2.2.0')
         $moduleInfo.Guid | Should -Not -Be ([Guid]::Empty)
         $moduleInfo.Author | Should -Be 'Leon Zhu, Jerry Abouelnasr'
         $moduleInfo.Description | Should -Not -BeNullOrEmpty
@@ -68,6 +68,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
         $resultCalls.Count | Should -BeGreaterThan 30
         foreach ($expectedId in @(
                 'CFG01', 'CFG02', 'CFG03', 'CFG04', 'CFG05', 'CFG06',
+                'RUN01',
                 'LOC01', 'LOC02', 'LOC03', 'LOC04', 'LOC05', 'LOC06', 'LOC07', 'LOC08', 'LOC09',
                 'CON01', 'CON02', 'CON03', 'CON04', 'CON05',
                 'NDES00', 'NDES01', 'NDES02', 'NDES03', 'NDES04', 'NDES05', 'NDES06', 'NDES07', 'NDES08', 'NDES09',
@@ -229,6 +230,104 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
                 'IisLogCount', 'PassThru'
             )) {
             $parameterNames | Should -Contain $expected
+        }
+    }
+
+    It 'passes a fully authenticated ServiceAddresses response with both required services' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $content = '{"EnrollmentService":"https://enrollment.example.test/","RAODJPlusFEGatewayService":"https://gateway.example.test/"}'
+            $assessment = Get-ServiceLocatorHttpAssessment `
+                -StatusCode 200 `
+                -ClientCertificatePresented $true `
+                -Content $content
+
+            $assessment.Status | Should -Be 'Pass'
+            $assessment.MissingServices.Count | Should -Be 0
+        }
+    }
+
+    It 'fails incomplete or rejected authenticated ServiceAddresses responses' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $incomplete = Get-ServiceLocatorHttpAssessment `
+                -StatusCode 200 `
+                -ClientCertificatePresented $true `
+                -Content '{"EnrollmentService":"https://enrollment.example.test/"}'
+            $rejected = Get-ServiceLocatorHttpAssessment `
+                -StatusCode 403 `
+                -ClientCertificatePresented $true
+            $serverError = Get-ServiceLocatorHttpAssessment `
+                -StatusCode 503 `
+                -ClientCertificatePresented $true
+
+            $incomplete.Status | Should -Be 'Fail'
+            $incomplete.MissingServices | Should -Contain 'RAODJPlusFEGatewayService'
+            $rejected.Status | Should -Be 'Fail'
+            $serverError.Status | Should -Be 'Fail'
+        }
+    }
+
+    It 'warns when only transport can be validated without an agent certificate' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $successWithoutCertificate = Get-ServiceLocatorHttpAssessment `
+                -StatusCode 200 `
+                -ClientCertificatePresented $false `
+                -Content '{"EnrollmentService":"https://enrollment.example.test/","RAODJPlusFEGatewayService":"https://gateway.example.test/"}'
+            $unauthorizedWithoutCertificate = Get-ServiceLocatorHttpAssessment `
+                -StatusCode 401 `
+                -ClientCertificatePresented $false
+            $unexpectedClientResponse = Get-ServiceLocatorHttpAssessment `
+                -StatusCode 404 `
+                -ClientCertificatePresented $false
+
+            $successWithoutCertificate.Status | Should -Be 'Warn'
+            $unauthorizedWithoutCertificate.Status | Should -Be 'Warn'
+            $unexpectedClientResponse.Status | Should -Be 'Warn'
+        }
+    }
+
+    It 'requires both connector service-map keys to resolve absolute endpoints' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $complete = Get-ServiceLocatorMapAssessment -ServiceMap @{
+                EnrollmentService          = [Uri]'https://enrollment.example.test/'
+                RAODJPlusFEGatewayService  = [Uri]'https://gateway.example.test/'
+            }
+            $missing = Get-ServiceLocatorMapAssessment -ServiceMap @{
+                EnrollmentService = [Uri]'https://enrollment.example.test/'
+            }
+            $invalid = Get-ServiceLocatorMapAssessment -ServiceMap @{
+                EnrollmentService          = [Uri]'https://enrollment.example.test/'
+                RAODJPlusFEGatewayService  = '/relative/path'
+            }
+
+            $complete.Complete | Should -BeTrue
+            $complete.ResolvedServices.Count | Should -Be 2
+            $missing.Complete | Should -BeFalse
+            $missing.MissingServices | Should -Contain 'RAODJPlusFEGatewayService'
+            $invalid.Complete | Should -BeFalse
+            $invalid.InvalidServices | Should -Contain 'RAODJPlusFEGatewayService'
+        }
+    }
+
+    It 'converts an unexpected runtime exception into a RUN01 report' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            Mock Get-ConnectorProduct { throw 'Simulated unexpected discovery failure' }
+            $logPath = Join-Path ([IO.Path]::GetTempPath()) ("RUN01-{0}.log" -f [guid]::NewGuid())
+            try {
+                $report = Test-IntuneCertificateConnector `
+                    -SkipNdesChecks `
+                    -SkipNetworkChecks `
+                    -SkipEventLogChecks `
+                    -SkipDynamic `
+                    -OutFile $logPath `
+                    -PassThru 6>$null
+
+                $report.Overall | Should -Be 'FAIL'
+                $report.Counts.Fail | Should -BeGreaterThan 0
+                @($report.Results | Where-Object Id -eq 'RUN01').Count | Should -Be 1
+                Test-Path $logPath | Should -BeTrue
+            } finally {
+                Remove-Item $logPath -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 
