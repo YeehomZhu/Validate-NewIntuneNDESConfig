@@ -284,6 +284,7 @@ Special thanks to **Jerry Abouelnasr** for providing the new idea that inspired 
 
 | Version | Notes |
 |---------|-------|
+| 2.3.0 | Fixed a socket leak, multi-SAN certificate name matching, nested local-group membership, IIS binding and log collection accuracy, and locale-dependent clock-skew parsing; the run now restores the process-wide TLS setting and honors `-ErrorAction` |
 | 2.2.0 | Tightened authenticated ServiceAddresses and service-map validation; added defensive RUN01 fallback reporting |
 | 2.1.0 | Added Jerry Abouelnasr as co-author; reorganized the PSM1 into functional regions and introduced explicit per-run diagnostic context without changing the public API or result IDs |
 | 2.0.2 | Reformatted the Gallery main description as a multiline numbered Quick Start |

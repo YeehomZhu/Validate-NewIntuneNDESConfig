@@ -150,7 +150,7 @@ function Add-Result {
 }
 
 # Writes a consistently formatted heading that separates diagnostic sections.
-function Section {
+function Write-DiagnosticSection {
     param([string]$Title)
 
     Write-Line ''
@@ -260,7 +260,7 @@ function Invoke-Finalization {
 
 #region Event Log Validation
 
-Section 'Recent Certificate Connector and NDES event logs'
+Write-DiagnosticSection 'Recent Certificate Connector and NDES event logs'
 if ($SkipEventLogChecks) {
     Add-Result -Id 'EVT00' -Category EventLog -Name 'Recent event-log analysis' -Status 'Info' `
         -Detail 'Skipped with -SkipEventLogChecks.'
@@ -363,7 +363,7 @@ if ($SkipEventLogChecks) {
 
 #region Evidence Collection
 
-Section 'Diagnostic evidence collection'
+Write-DiagnosticSection 'Diagnostic evidence collection'
 if ($CollectLogs) {
     $collection = Initialize-DiagnosticCollection -RequestedPath $DiagnosticBundlePath -RecentIisLogCount $IisLogCount
     $script:BundleStage = $collection.Stage
@@ -381,7 +381,7 @@ if ($CollectLogs) {
 
 #region Summary and Output
 
-Section 'Summary'
+Write-DiagnosticSection 'Summary'
 $passes = @($script:Results | Where-Object { $_.Status -eq 'Pass' })
 $warnings = @($script:Results | Where-Object { $_.Status -eq 'Warn' })
 $failures = @($script:Results | Where-Object { $_.Status -eq 'Fail' })
@@ -528,7 +528,7 @@ function Invoke-NetworkAndDynamicValidation {
 
 #region Network Prerequisites
 
-Section 'Network prerequisites'
+Write-DiagnosticSection 'Network prerequisites'
 
 if ($SkipNetworkChecks) {
     Add-Result -Id 'NET00' -Category Network -Name 'External network validation' -Status 'Info' `
@@ -734,6 +734,8 @@ if ($SkipNetworkChecks) {
             $httpHandler.Proxy = New-Object Net.WebProxy($proxyUri, $false)
             $httpHandler.UseProxy = $true
         }
+        # Restored by the public command so the diagnostic never leaves the
+        # caller's process-wide TLS configuration modified.
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $httpClient = New-Object Net.Http.HttpClient($httpHandler)
         $httpClient.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
@@ -810,7 +812,7 @@ if ($SkipNetworkChecks) {
 #region Internal NDES Endpoint
 
 if (-not $SkipNdesChecks) {
-    Section 'Internal NDES endpoint behavior'
+    Write-DiagnosticSection 'Internal NDES endpoint behavior'
     if ($Context.NdesRoleKnown -and -not $Context.NdesRoleInstalled) {
         Add-Result -Id 'NDES08' -Category NDES -Name 'Direct MSCEP URL is protected' -Status 'Info' -Detail 'NDES role is not installed; not applicable.'
         Add-Result -Id 'NDES09' -Category NDES -Name 'MSCEP GetCACaps response' -Status 'Info' -Detail 'NDES role is not installed; not applicable.'
@@ -823,18 +825,25 @@ if (-not $SkipNdesChecks) {
     } else {
         $ndesBaseUrl = "https://$($Context.Fqdn)/certsrv/mscep/mscep.dll"
         $directNdesResponse = Invoke-DiagnosticWebRequest -Uri $ndesBaseUrl -TimeoutSec $TimeoutSeconds -NoProxy
-        $directStatus = if ($directNdesResponse.StatusCode -eq 403) {
-            'Pass'
+        # An unprotected HTTP 200 is only a failure once this connector actually
+        # services SCEP; before that the Intune policy module is not expected.
+        $scepPolicyModuleExpected = [string](Get-Reg $Context.ConnKey 'EnableSCEP') -eq '1'
+        $directStatus = 'Fail'
+        $directRemediation = 'Direct access must return 403. Investigate the SCEP application pool, the IIS HTTPS binding, and the NDES configuration; HTTP 503 usually indicates application-pool failure.'
+        if ($directNdesResponse.StatusCode -eq 403) {
+            $directStatus = 'Pass'
+            $directRemediation = ''
         } elseif ($directNdesResponse.StatusCode -eq 200) {
-            'Fail'
-        } elseif ($null -ne $directNdesResponse.StatusCode) {
-            'Fail'
-        } else {
-            'Fail'
+            if ($scepPolicyModuleExpected) {
+                $directRemediation = 'SCEP is enabled on this connector, so the Intune SCEP policy module must return 403 for direct access. Reinstall or reconfigure the policy module.'
+            } else {
+                $directStatus = 'Warn'
+                $directRemediation = 'NDES answers directly because SCEP is not enabled on this connector yet. Direct access must return 403 once the Intune SCEP policy module is configured.'
+            }
         }
         Add-Result -Id 'NDES08' -Category NDES -Name 'Direct MSCEP URL is protected' -Status $directStatus `
-            -Detail ("GET {0} -> HTTP {1}; Error={2}" -f $ndesBaseUrl, $directNdesResponse.StatusCode, $directNdesResponse.Error) `
-            -Remediation 'After the Intune SCEP policy module is installed, direct access should return 403. HTTP 200 suggests the policy module is not protecting the endpoint; HTTP 503 usually indicates application-pool failure.'
+            -Detail ("GET {0} -> HTTP {1}; ConnectorScepEnabled={2}; Error={3}" -f $ndesBaseUrl, $directNdesResponse.StatusCode, $scepPolicyModuleExpected, $directNdesResponse.Error) `
+            -Remediation $directRemediation
 
         $caCapsUrl = "$ndesBaseUrl`?operation=GetCACaps&message=test"
         $caCapsResponse = Invoke-DiagnosticWebRequest -Uri $caCapsUrl -TimeoutSec $TimeoutSeconds -NoProxy
@@ -852,7 +861,7 @@ if (-not $SkipNdesChecks) {
 
 #region Dynamic Connector Assembly
 
-Section 'Dynamic connector assembly validation'
+Write-DiagnosticSection 'Dynamic connector assembly validation'
 if ($SkipDynamic) {
     Add-Result -Id 'DYN01' -Category Dynamic -Name 'ServiceLocatorClient via connector assembly' -Status 'Info' `
         -Detail 'Skipped with -SkipDynamic.'
@@ -1117,8 +1126,70 @@ function Resolve-AccountSid {
     }
 }
 
+# Enumerates the member SIDs of a WinNT group and expands nested groups within
+# bounded depth and size limits, so an account that inherits access through a
+# nested domain group is still detected. Reports whether enumeration completed.
+function Get-GroupMemberSidSet {
+    param(
+        [string]$AdsPath,
+        [int]$MaxDepth = 2,
+        [int]$MaxMembers = 5000
+    )
+
+    $sids = New-Object 'System.Collections.Generic.HashSet[string]'
+    $visited = New-Object 'System.Collections.Generic.HashSet[string]'
+    $queue = New-Object 'System.Collections.Generic.Queue[object]'
+    $complete = $true
+    $queue.Enqueue([pscustomobject]@{ Path = $AdsPath; Depth = 0 })
+
+    while ($queue.Count -gt 0) {
+        if ($sids.Count -ge $MaxMembers) {
+            $complete = $false
+            break
+        }
+
+        $current = $queue.Dequeue()
+        if (-not $visited.Add(([string]$current.Path).ToLowerInvariant())) {
+            continue
+        }
+
+        $members = $null
+        try {
+            $members = @(([ADSI]$current.Path).psbase.Invoke('Members'))
+        } catch {
+            $complete = $false
+            continue
+        }
+
+        foreach ($member in $members) {
+            try {
+                $bytes = [byte[]]$member.GetType().InvokeMember(
+                    'objectSid',
+                    'GetProperty',
+                    $null,
+                    $member,
+                    $null
+                )
+                $null = $sids.Add((New-Object Security.Principal.SecurityIdentifier($bytes, 0)).Value)
+
+                $memberClass = [string]$member.GetType().InvokeMember('Class', 'GetProperty', $null, $member, $null)
+                if ($memberClass -eq 'Group' -and $current.Depth -lt $MaxDepth) {
+                    $memberPath = [string]$member.GetType().InvokeMember('ADsPath', 'GetProperty', $null, $member, $null)
+                    if ($memberPath) {
+                        $queue.Enqueue([pscustomobject]@{ Path = $memberPath; Depth = $current.Depth + 1 })
+                    }
+                }
+            } catch {
+                $complete = $false
+            }
+        }
+    }
+
+    return [pscustomobject]@{ Sids = $sids; Complete = $complete }
+}
+
 # Tests whether an account SID is a member of a localized built-in group by using
-# the group's well-known SID and ADSI member enumeration.
+# the group's well-known SID and recursive ADSI member enumeration.
 function Test-LocalGroupMembershipBySid {
     param([string]$AccountName, [string]$GroupSid)
 
@@ -1140,22 +1211,10 @@ function Test-LocalGroupMembershipBySid {
             throw "Could not resolve SID for account '$AccountName'."
         }
 
-        $adsiGroup = [ADSI]("WinNT://{0}/{1},group" -f $env:COMPUTERNAME, $group.Name)
-        foreach ($member in @($adsiGroup.psbase.Invoke('Members'))) {
-            try {
-                $bytes = [byte[]]$member.GetType().InvokeMember(
-                    'objectSid',
-                    'GetProperty',
-                    $null,
-                    $member,
-                    $null
-                )
-                $memberSid = New-Object Security.Principal.SecurityIdentifier($bytes, 0)
-                if ($memberSid.Value -eq $accountSid) {
-                    $output.IsMember = $true
-                    break
-                }
-            } catch {}
+        $membership = Get-GroupMemberSidSet -AdsPath ("WinNT://{0}/{1},group" -f $env:COMPUTERNAME, $group.Name)
+        $output.IsMember = $membership.Sids.Contains($accountSid)
+        if (-not $output.IsMember -and -not $membership.Complete) {
+            throw "Membership of '$AccountName' in '$($group.Name)' is unknown because one or more nested groups could not be enumerated."
         }
         $output.Known = $true
     } catch {
@@ -1341,6 +1400,91 @@ function Get-CertificateTemplateName {
     return @($names | Where-Object { $_ } | Select-Object -Unique)
 }
 
+# Reads a DER length prefix at the referenced offset and advances that offset
+# past the consumed length bytes.
+function Read-DerLength {
+    param(
+        [byte[]]$Data,
+        [ref]$Offset
+    )
+
+    $first = $Data[$Offset.Value]
+    $Offset.Value = $Offset.Value + 1
+    if ($first -lt 0x80) {
+        return [int]$first
+    }
+
+    $byteCount = $first -band 0x7F
+    if ($byteCount -eq 0 -or $byteCount -gt 4) {
+        throw 'Unsupported DER length encoding.'
+    }
+
+    $length = 0
+    for ($index = 0; $index -lt $byteCount; $index++) {
+        $length = ($length -shl 8) -bor $Data[$Offset.Value]
+        $Offset.Value = $Offset.Value + 1
+    }
+    return $length
+}
+
+# Extracts every dNSName entry from a raw Subject Alternative Name extension.
+# The DER walk avoids the localized text that AsnEncodedData.Format produces.
+function Get-SubjectAlternativeDnsName {
+    param([byte[]]$RawData)
+
+    $names = @()
+    if ($null -eq $RawData -or $RawData.Length -lt 2 -or $RawData[0] -ne 0x30) {
+        return $names
+    }
+
+    try {
+        $offset = 1
+        $sequenceLength = Read-DerLength -Data $RawData -Offset ([ref]$offset)
+        $end = [Math]::Min($RawData.Length, $offset + $sequenceLength)
+        while ($offset -lt $end) {
+            $tag = $RawData[$offset]
+            $offset = $offset + 1
+            $length = Read-DerLength -Data $RawData -Offset ([ref]$offset)
+            if ($length -lt 0 -or ($offset + $length) -gt $RawData.Length) {
+                break
+            }
+            if ($tag -eq 0x82) {
+                $names += [Text.Encoding]::ASCII.GetString($RawData, $offset, $length)
+            }
+            $offset = $offset + $length
+        }
+    } catch {}
+
+    return $names
+}
+
+# Returns every DNS name a certificate can present by combining all Subject
+# Alternative Name dNSName entries with the subject common name.
+function Get-CertificateDnsName {
+    param([Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+
+    $names = @()
+    if (-not $Certificate) {
+        return $names
+    }
+
+    foreach ($extension in $Certificate.Extensions) {
+        if ($extension.Oid.Value -eq '2.5.29.17') {
+            $names += Get-SubjectAlternativeDnsName -RawData $extension.RawData
+        }
+    }
+
+    try {
+        $commonName = $Certificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+        if ($commonName) { $names += $commonName }
+    } catch {}
+
+    return @($names | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ } | Select-Object -Unique)
+}
+
 # Compares an expected DNS hostname with a presented certificate name, including
 # single-label wildcard certificate matching.
 function Test-DnsNameMatch {
@@ -1420,6 +1564,9 @@ function Connect-Tls443 {
     $result = @{ Ok = $false; Stream = $null; Tcp = $null; ProxyStatus = $null; Error = $null }
     try {
         $tcp = New-Object Net.Sockets.TcpClient
+        # Publish the socket before connecting so every failure path, including a
+        # connect timeout, still lets the caller close it instead of leaking it.
+        $result.Tcp = $tcp
         if ($ProxyUri) {
             $async = $tcp.BeginConnect($ProxyUri.Host, $ProxyUri.Port, $null, $null)
             if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) {
@@ -1444,7 +1591,6 @@ function Connect-Tls443 {
             $result.ProxyStatus = $statusLine
             if ($statusLine -notmatch ' 200 ') {
                 $result.Error = "Proxy CONNECT refused: $statusLine"
-                $result.Tcp = $tcp
                 return $result
             }
         } else {
@@ -1455,7 +1601,6 @@ function Connect-Tls443 {
             $tcp.EndConnect($async)
         }
 
-        $result.Tcp = $tcp
         $result.Stream = $tcp.GetStream()
         $result.Ok = $true
     } catch {
@@ -1470,7 +1615,8 @@ function Connect-Tls443 {
 #region IIS, Event Log, and Collection Helpers
 
 # Discovers the SCEP application pool, process-model identity, state, and HTTPS
-# bindings through WebAdministration with an appcmd.exe fallback.
+# bindings through WebAdministration with an appcmd.exe fallback for the pool.
+# BindingsKnown reports whether the HTTPS binding list is authoritative.
 function Get-IisScepConfiguration {
     $result = [pscustomobject]@{
         Available       = $false
@@ -1478,39 +1624,58 @@ function Get-IisScepConfiguration {
         PoolState       = $null
         IdentityType    = $null
         UserName        = $null
+        BindingsKnown   = $false
         HttpsBindings   = @()
         Error           = $null
     }
 
+    $webAdministrationLoaded = $false
     try {
         Import-Module WebAdministration -ErrorAction Stop
+        $webAdministrationLoaded = $true
         $result.Available = $true
-        if (Test-Path 'IIS:\AppPools\SCEP') {
-            $result.PoolExists = $true
-            $result.PoolState = [string](Get-WebAppPoolState -Name 'SCEP' -ErrorAction Stop).Value
-            $processModel = Get-ItemProperty 'IIS:\AppPools\SCEP' -Name processModel -ErrorAction Stop
-            $result.IdentityType = [string]$processModel.identityType
-            $result.UserName = [string]$processModel.userName
-        }
-        $result.HttpsBindings = @(Get-WebBinding -Protocol https -ErrorAction SilentlyContinue)
-        return $result
     } catch {
         $result.Error = $_.Exception.Message
     }
 
-    $appCmd = Join-Path $env:SystemRoot 'System32\inetsrv\appcmd.exe'
-    if (Test-Path $appCmd) {
+    if ($webAdministrationLoaded) {
         try {
-            $state = & $appCmd list apppool /name:SCEP /text:state 2>$null
-            if ($LASTEXITCODE -eq 0 -and $state) {
-                $result.Available = $true
+            if (Test-Path 'IIS:\AppPools\SCEP') {
                 $result.PoolExists = $true
-                $result.PoolState = ([string]$state).Trim()
-                $result.UserName = ([string](& $appCmd list apppool /name:SCEP /text:processModel.userName 2>$null)).Trim()
-                $result.IdentityType = ([string](& $appCmd list apppool /name:SCEP /text:processModel.identityType 2>$null)).Trim()
+                $result.PoolState = [string](Get-WebAppPoolState -Name 'SCEP' -ErrorAction Stop).Value
+                $processModel = Get-ItemProperty 'IIS:\AppPools\SCEP' -Name processModel -ErrorAction Stop
+                $result.IdentityType = [string]$processModel.identityType
+                $result.UserName = [string]$processModel.userName
             }
         } catch {
             if (-not $result.Error) { $result.Error = $_.Exception.Message }
+        }
+
+        # Enumerated separately so an application-pool read failure never hides
+        # the HTTPS bindings that the certificate checks depend on.
+        try {
+            $result.HttpsBindings = @(Get-WebBinding -Protocol https -ErrorAction Stop)
+            $result.BindingsKnown = $true
+        } catch {
+            if (-not $result.Error) { $result.Error = $_.Exception.Message }
+        }
+    }
+
+    if (-not $result.PoolExists) {
+        $appCmd = Join-Path $env:SystemRoot 'System32\inetsrv\appcmd.exe'
+        if (Test-Path $appCmd) {
+            try {
+                $state = & $appCmd list apppool /name:SCEP /text:state 2>$null
+                if ($LASTEXITCODE -eq 0 -and $state) {
+                    $result.Available = $true
+                    $result.PoolExists = $true
+                    $result.PoolState = ([string]$state).Trim()
+                    $result.UserName = ([string](& $appCmd list apppool /name:SCEP /text:processModel.userName 2>$null)).Trim()
+                    $result.IdentityType = ([string](& $appCmd list apppool /name:SCEP /text:processModel.identityType 2>$null)).Trim()
+                }
+            } catch {
+                if (-not $result.Error) { $result.Error = $_.Exception.Message }
+            }
         }
     }
 
@@ -1593,7 +1758,10 @@ function Initialize-DiagnosticCollection {
                 Sort-Object LastWriteTime -Descending |
                 Select-Object -First $RecentIisLogCount
             foreach ($iisLog in $iisLogs) {
-                Copy-Item -Path $iisLog.FullName -Destination (Join-Path $iisDestination $iisLog.Name) -Force -ErrorAction Stop
+                # Prefix the site folder because recursive collection routinely
+                # finds identically named daily logs under several W3SVC folders.
+                $uniqueName = "{0}_{1}" -f $iisLog.Directory.Name, $iisLog.Name
+                Copy-Item -Path $iisLog.FullName -Destination (Join-Path $iisDestination $uniqueName) -Force -ErrorAction Stop
                 $collected++
             }
             if (-not $iisLogs) { $warnings += 'No IIS log files were found.' }
@@ -1746,7 +1914,7 @@ function Test-IntuneCertificateConnector {
     [OutputType([pscustomobject])]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'The default contract is a color-coded direct diagnostic result.')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'Best-effort probes convert unavailable data into explicit diagnostic results.')]
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Parameters are consumed by private orchestration functions through the invocation scope.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Every parameter is forwarded to Initialize-DiagnosticContext and consumed by the private orchestration functions through that context object.')]
     param(
         [string]$ConnectorType = 'PFXCertificateConnector',
         [string]$BaseAddress,
@@ -1770,8 +1938,13 @@ function Test-IntuneCertificateConnector {
     }
 
     $script:DiagnosticRunning = $true
+    $originalSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
     try {
-        $local:ErrorActionPreference = 'Continue'
+        # Best-effort probes are the norm here, but an explicit -ErrorAction from
+        # the caller still wins.
+        if (-not $PSBoundParameters.ContainsKey('ErrorAction')) {
+            $ErrorActionPreference = 'Continue'
+        }
         $script:StartedAtUtc = (Get-Date).ToUniversalTime()
         $script:Results = New-Object System.Collections.Generic.List[object]
         $script:Transcript = New-Object System.Collections.Generic.List[string]
@@ -1805,7 +1978,7 @@ Write-Line ' Intune Certificate Connector + NDES complete pre-flight diagnostic'
 Write-Line ("   host={0}  user={1}\{2}  {3}" -f $env:COMPUTERNAME, $env:USERDOMAIN, $env:USERNAME, (Get-Date)) 'DarkGray'
 Write-Line '===============================================================================' 'White'
 
-Section 'Configuration discovered from the connector'
+Write-DiagnosticSection 'Configuration discovered from the connector'
 $connKey = "SOFTWARE\Microsoft\MicrosoftIntune\$ConnectorType"
 $proxyKey = "$connKey\Proxy"
 $statusKey = "$connKey\ConnectionStatus"
@@ -1871,7 +2044,7 @@ Add-Result -Id 'CFG06' -Category Config -Name 'Connector proxy configuration' -S
 
     #region Phase 2 - Local Prerequisites
 
-Section 'Local prerequisites'
+Write-DiagnosticSection 'Local prerequisites'
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator
@@ -1881,11 +2054,22 @@ Add-Result -Id 'LOC01' -Category Local -Name 'Running elevated (Administrator)' 
     -Detail "IsAdmin=$isAdmin" `
     -Remediation 'Run from an elevated Windows PowerShell session for complete role, IIS, account-right, and event-log results.'
 
-$os = [Environment]::OSVersion.Version
+# Win32_OperatingSystem reports the real build number. [Environment]::OSVersion
+# is shimmed to 6.2 for hosts without a supportedOS application manifest.
+$os = $null
+$osSource = 'Win32_OperatingSystem'
+try {
+    $osVersionText = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Version
+    if ($osVersionText) { $os = [Version]$osVersionText }
+} catch {}
+if (-not $os) {
+    $os = [Environment]::OSVersion.Version
+    $osSource = 'Environment.OSVersion'
+}
 $osOk = ($os.Major -gt 6) -or ($os.Major -eq 6 -and $os.Minor -ge 3)
 Add-Result -Id 'LOC02' -Category Local -Name 'Operating system version' `
     -Status $(if ($osOk) { 'Pass' } else { 'Fail' }) `
-    -Detail "OSVersion=$os" `
+    -Detail "OSVersion=$os; Source=$osSource" `
     -Remediation 'Windows Server 2012 R2 or later is required. Windows Server 2019 or later is required for Certificate Connector strong mapping support.'
 
 $ndpRelease = Get-Reg 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' 'Release'
@@ -1933,7 +2117,18 @@ if ($SkipNetworkChecks) {
                 } finally {
                     if ($response) { $response.Close() }
                 }
-                if ($dateHeader) { $referenceTime = [DateTime]::Parse($dateHeader).ToUniversalTime() }
+                if ($dateHeader) {
+                    # The HTTP Date header is RFC 1123, so it must be parsed with
+                    # the invariant culture to stay correct on every locale.
+                    $headerDate = [DateTimeOffset]::MinValue
+                    if ([DateTimeOffset]::TryParse(
+                            $dateHeader,
+                            [Globalization.CultureInfo]::InvariantCulture,
+                            [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AllowWhiteSpaces,
+                            [ref]$headerDate)) {
+                        $referenceTime = $headerDate.UtcDateTime
+                    }
+                }
             } catch {}
         }
     }
@@ -2033,7 +2228,7 @@ $context.OperatingSystemVersion = $os
 
     #region Phase 3 - Connector Health
 
-Section 'Certificate Connector configuration and health'
+Write-DiagnosticSection 'Certificate Connector configuration and health'
 
 Add-Result -Id 'CON01' -Category Connector -Name 'Installed product details' `
     -Status $(if ($product -or $installFolder) { 'Pass' } else { 'Warn' }) `
@@ -2108,10 +2303,10 @@ if ($lastConn -and -not $lastConnectionUtc) {
     #region Phase 4 - NDES, IIS, and Certificates
 
 if ($SkipNdesChecks) {
-    Section 'NDES and IIS validation'
+    Write-DiagnosticSection 'NDES and IIS validation'
     Add-Result -Id 'NDES00' -Category NDES -Name 'NDES and IIS validation' -Status 'Info' -Detail 'Skipped with -SkipNdesChecks.'
 } else {
-    Section 'NDES server roles and Windows features'
+    Write-DiagnosticSection 'NDES server roles and Windows features'
 
     $computerSystem = $null
     try { $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop } catch {}
@@ -2197,16 +2392,16 @@ if ($SkipNdesChecks) {
         -Remediation 'This is an availability heuristic, not proof of the provider selected during NDES setup. Review NDES cryptography configuration if absent.'
 
     if ($context.NdesRoleKnown -and -not $context.NdesRoleInstalled) {
-        Section 'IIS and NDES service account'
+        Write-DiagnosticSection 'IIS and NDES service account'
         Add-Result -Id 'IIS00' -Category IIS -Name 'NDES-specific IIS and account checks' -Status 'Info' `
             -Detail 'NDES role is not installed; SCEP application-pool, account, MSCEP, and NDES certificate checks are not applicable.'
     } elseif (-not $context.NdesRoleKnown) {
-        Section 'IIS and NDES service account'
+        Write-DiagnosticSection 'IIS and NDES service account'
         Add-Result -Id 'IIS00' -Category IIS -Name 'NDES-specific IIS and account checks' -Status 'Warn' `
             -Detail 'NDES role state could not be determined; NDES-specific IIS and certificate checks were skipped.' `
             -Remediation 'Run on Windows Server with the ServerManager module available.'
     } else {
-    Section 'IIS and NDES service account'
+    Write-DiagnosticSection 'IIS and NDES service account'
     $iisConfiguration = Get-IisScepConfiguration
     $appPoolAccount = Get-AppPoolAccountName $iisConfiguration
     Add-Result -Id 'IIS01' -Category IIS -Name 'SCEP application pool exists and is started' `
@@ -2266,16 +2461,33 @@ if ($SkipNdesChecks) {
         -Detail ("SignatureTemplate={0}; EncryptionTemplate={1}; GeneralPurposeTemplate={2}" -f $signatureTemplate, $encryptionTemplate, $generalTemplate) `
         -Remediation 'Set each applicable MSCEP registry value to the certificate template name, not its display name; do not leave applicable values at IPSECIntermediateOffline.'
 
-    Section 'NDES and IIS certificates'
+    Write-DiagnosticSection 'NDES and IIS certificates'
+    # A cross-signed copy of a root that is also installed as a self-signed root
+    # is expected, so it is reported separately from a genuinely misplaced
+    # intermediate certificate.
     $misplacedIntermediates = @()
+    $crossSignedRoots = @()
     try {
-        $misplacedIntermediates = @(Get-ChildItem Cert:\LocalMachine\Root -ErrorAction Stop |
-                Where-Object { $_.Issuer -ne $_.Subject })
+        $rootCertificates = @(Get-ChildItem Cert:\LocalMachine\Root -ErrorAction Stop)
+        $selfSignedRootSubjects = @{}
+        foreach ($rootCertificate in $rootCertificates) {
+            if ($rootCertificate.Issuer -eq $rootCertificate.Subject) {
+                $selfSignedRootSubjects[$rootCertificate.Subject] = $true
+            }
+        }
+        foreach ($rootCertificate in $rootCertificates) {
+            if ($rootCertificate.Issuer -eq $rootCertificate.Subject) { continue }
+            if ($selfSignedRootSubjects.ContainsKey($rootCertificate.Subject)) {
+                $crossSignedRoots += $rootCertificate
+            } else {
+                $misplacedIntermediates += $rootCertificate
+            }
+        }
     } catch {}
     Add-Result -Id 'CERT01' -Category Certificate -Name 'Trusted Root store has no intermediate certificates' `
-        -Status $(if ($misplacedIntermediates.Count -eq 0) { 'Pass' } else { 'Fail' }) `
-        -Detail $(if ($misplacedIntermediates.Count -eq 0) { 'No issuer/subject-mismatched certificates were found in LocalMachine\Root.' } else { ($misplacedIntermediates | ForEach-Object { "$($_.Subject) [$($_.Thumbprint)]" }) -join '; ' }) `
-        -Remediation 'Move intermediate CA certificates to LocalMachine\CA after confirming the intended trust chain.'
+        -Status $(if ($misplacedIntermediates.Count -eq 0) { 'Pass' } else { 'Warn' }) `
+        -Detail ("CrossSignedRoots={0}; Misplaced={1}" -f $crossSignedRoots.Count, $(if ($misplacedIntermediates.Count -eq 0) { '<none>' } else { ($misplacedIntermediates | ForEach-Object { "$($_.Subject) [$($_.Thumbprint)]" }) -join '; ' })) `
+        -Remediation 'Move genuine intermediate CA certificates to LocalMachine\CA after confirming the intended trust chain. NET07 validates the live service chain and is authoritative.'
 
     $machineCertificates = @()
     try { $machineCertificates = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop) } catch {}
@@ -2311,7 +2523,11 @@ if ($SkipNdesChecks) {
         } catch {}
     }
 
-    if ($httpsBindings.Count -eq 0) {
+    if (-not $iisConfiguration.BindingsKnown) {
+        Add-Result -Id 'CERT04' -Category Certificate -Name 'IIS HTTPS server-authentication binding' -Status 'Warn' `
+            -Detail ("IIS HTTPS bindings could not be enumerated; Error={0}" -f $iisConfiguration.Error) `
+            -Remediation 'Run this diagnostic in elevated Windows PowerShell where the WebAdministration module is available, then confirm the NDES HTTPS binding manually.'
+    } elseif ($httpsBindings.Count -eq 0) {
         Add-Result -Id 'CERT04' -Category Certificate -Name 'IIS HTTPS server-authentication binding' -Status 'Fail' `
             -Detail 'No IIS HTTPS binding was discovered.' `
             -Remediation 'Install a valid Server Authentication certificate and bind it to the NDES IIS site on TCP 443.'
@@ -2324,13 +2540,13 @@ if ($SkipNdesChecks) {
         $bindingDetails = @()
         foreach ($item in $bindingCertificates) {
             $certificate = $item.Certificate
-            $dnsName = $certificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::DnsName, $false)
+            $dnsNames = @(Get-CertificateDnsName -Certificate $certificate)
             $serverAuth = @($certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | ForEach-Object { $_.Format($false) }) -join ';'
             $ekuOk = -not $serverAuth -or $serverAuth -match '1\.3\.6\.1\.5\.5\.7\.3\.1|Server Authentication'
-            $nameOk = Test-DnsNameMatch -Expected $context.Fqdn -Presented $dnsName
+            $nameOk = @($dnsNames | Where-Object { Test-DnsNameMatch -Expected $context.Fqdn -Presented $_ }).Count -gt 0
             $timeOk = $certificate.NotBefore -le (Get-Date) -and $certificate.NotAfter -gt (Get-Date)
             if ($timeOk -and $certificate.HasPrivateKey -and $ekuOk -and $nameOk) { $usableBinding = $item }
-            $bindingDetails += "Binding=$($item.Binding), Subject=$($certificate.Subject), DNS=$dnsName, NotAfter=$($certificate.NotAfter.ToUniversalTime().ToString('u')), PrivateKey=$($certificate.HasPrivateKey), ServerAuth=$ekuOk, NameMatch=$nameOk"
+            $bindingDetails += "Binding=$($item.Binding), Subject=$($certificate.Subject), DNS=$($dnsNames -join '|'), NotAfter=$($certificate.NotAfter.ToUniversalTime().ToString('u')), PrivateKey=$($certificate.HasPrivateKey), ServerAuth=$ekuOk, NameMatch=$nameOk"
         }
         Add-Result -Id 'CERT04' -Category Certificate -Name 'IIS HTTPS server-authentication binding' `
             -Status $(if ($usableBinding) { 'Pass' } else { 'Fail' }) `
@@ -2368,6 +2584,7 @@ Invoke-NetworkAndDynamicValidation -Context $context
         if ($script:BundleStage -and (Test-Path $script:BundleStage)) {
             Remove-Item -Path $script:BundleStage -Recurse -Force -ErrorAction SilentlyContinue
         }
+        [Net.ServicePointManager]::SecurityProtocol = $originalSecurityProtocol
         $script:DiagnosticRunning = $false
     }
 }

@@ -28,7 +28,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
     It 'contains a valid PowerShell Gallery module manifest' {
         $moduleInfo = Test-ModuleManifest -Path $manifestPath
         $moduleInfo.Name | Should -Be 'IntuneCertificateConnectorDiagnostics'
-        $moduleInfo.Version | Should -Be ([Version]'2.2.0')
+        $moduleInfo.Version | Should -Be ([Version]'2.3.0')
         $moduleInfo.Guid | Should -Not -Be ([Guid]::Empty)
         $moduleInfo.Author | Should -Be 'Leon Zhu, Jerry Abouelnasr'
         $moduleInfo.Description | Should -Not -BeNullOrEmpty
@@ -305,6 +305,116 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
             $missing.MissingServices | Should -Contain 'RAODJPlusFEGatewayService'
             $invalid.Complete | Should -BeFalse
             $invalid.InvalidServices | Should -Contain 'RAODJPlusFEGatewayService'
+        }
+    }
+
+    It 'reads every Subject Alternative Name DNS entry from raw extension data' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $expected = @(
+                'ndes.contoso.test'
+                'scep.contoso.test'
+                'ndes-external.contoso.test'
+                'autodiscover.contoso.test'
+                'enrollment.contoso.test'
+                'ndes-legacy.contoso.test'
+            )
+            $body = New-Object 'System.Collections.Generic.List[byte]'
+            foreach ($name in $expected) {
+                $encoded = [Text.Encoding]::ASCII.GetBytes($name)
+                $body.Add(0x82)
+                $body.Add([byte]$encoded.Length)
+                $body.AddRange($encoded)
+            }
+            # An iPAddress GeneralName must be skipped instead of decoded as DNS.
+            $body.Add(0x87)
+            $body.Add(4)
+            $body.AddRange([byte[]]@(10, 0, 0, 1))
+
+            $body.Count | Should -BeGreaterThan 127
+            $raw = New-Object 'System.Collections.Generic.List[byte]'
+            $raw.Add(0x30)
+            $raw.Add(0x81)
+            $raw.Add([byte]$body.Count)
+            $raw.AddRange($body)
+
+            $names = @(Get-SubjectAlternativeDnsName -RawData $raw.ToArray())
+            $names | Should -Be $expected
+        }
+    }
+
+    It 'matches the NDES FQDN against any certificate name, not only the first' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $presented = @('autodiscover.contoso.test', 'ndes.contoso.test', '*.wildcard.contoso.test')
+
+            @($presented | Where-Object { Test-DnsNameMatch -Expected 'ndes.contoso.test' -Presented $_ }) |
+                Should -Be @('ndes.contoso.test')
+            @($presented | Where-Object { Test-DnsNameMatch -Expected 'host.wildcard.contoso.test' -Presented $_ }) |
+                Should -Be @('*.wildcard.contoso.test')
+            @($presented | Where-Object { Test-DnsNameMatch -Expected 'other.contoso.test' -Presented $_ }).Count |
+                Should -Be 0
+        }
+    }
+
+    It 'returns a closable socket when a TCP connection attempt fails' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            # Loopback port 1 is refused immediately, which exercises the same
+            # failure path as a connect timeout without depending on the network.
+            $connection = Connect-Tls443 -TargetHost '127.0.0.1' -Port 1 -TimeoutMs 2000
+            try {
+                $connection.Ok | Should -BeFalse
+                $connection.Error | Should -Not -BeNullOrEmpty
+                $connection.Tcp | Should -Not -BeNullOrEmpty
+            } finally {
+                if ($connection.Tcp) { $connection.Tcp.Close() }
+            }
+        }
+    }
+
+    It 'reports whether the IIS HTTPS binding list is authoritative' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $configuration = Get-IisScepConfiguration
+            $configuration.PSObject.Properties.Name | Should -Contain 'BindingsKnown'
+            $configuration.BindingsKnown | Should -BeOfType [bool]
+            if (-not $configuration.BindingsKnown) {
+                @($configuration.HttpsBindings).Count | Should -Be 0
+            }
+        }
+    }
+
+    It 'marks group enumeration incomplete when a group cannot be read' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $missingGroup = "WinNT://{0}/NoSuchGroup{1},group" -f $env:COMPUTERNAME, [guid]::NewGuid().ToString('N')
+            $enumeration = Get-GroupMemberSidSet -AdsPath $missingGroup
+
+            $enumeration.Complete | Should -BeFalse
+            $enumeration.Sids.Count | Should -Be 0
+        }
+    }
+
+    It 'restores the process-wide TLS configuration after a run' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $original = [Net.ServicePointManager]::SecurityProtocol
+            Mock Get-ConnectorProduct {
+                [Net.ServicePointManager]::SecurityProtocol =
+                    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+                return $null
+            }
+            $logPath = Join-Path ([IO.Path]::GetTempPath()) ("tls-restore-{0}.log" -f [guid]::NewGuid())
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::SystemDefault
+                $null = Test-IntuneCertificateConnector `
+                    -SkipNdesChecks `
+                    -SkipNetworkChecks `
+                    -SkipEventLogChecks `
+                    -SkipDynamic `
+                    -OutFile $logPath 6>$null
+
+                [Net.ServicePointManager]::SecurityProtocol |
+                    Should -Be ([Net.SecurityProtocolType]::SystemDefault)
+            } finally {
+                [Net.ServicePointManager]::SecurityProtocol = $original
+                Remove-Item $logPath -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 

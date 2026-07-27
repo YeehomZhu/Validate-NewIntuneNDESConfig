@@ -1,6 +1,6 @@
 @{
     RootModule        = 'IntuneCertificateConnectorDiagnostics.psm1'
-    ModuleVersion     = '2.2.0'
+    ModuleVersion     = '2.3.0'
     GUID              = 'bb2983e7-ce6b-4ffe-9a20-84f1c8ed502c'
     Author            = 'Leon Zhu, Jerry Abouelnasr'
     CompanyName       = ''
@@ -19,6 +19,8 @@ Quick start:
 Checks cover Windows and IIS roles, service accounts, certificates, registry configuration, event logs, proxy, DNS, TLS trust, revocation, service-locator connectivity, and automatic updates.
 
 Full service-locator validation requires the enrolled agent certificate and verifies that EnrollmentService and RAODJPlusFEGatewayService resolve to absolute endpoint URIs.
+
+Run in Windows PowerShell 5.1 on the server for complete results. PowerShell 7 can import the module, but the Windows role and IIS configuration providers are unavailable there, so those checks report warnings instead of pass or fail.
 
 Acknowledgement: Thanks to Jerry Abouelnasr for the feature-detection idea.
 '@
@@ -55,6 +57,30 @@ Acknowledgement: Thanks to Jerry Abouelnasr for the feature-detection idea.
             LicenseUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig/blob/master/LICENSE'
             ProjectUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig'
             ReleaseNotes = @'
+Version 2.3.0:
+- Fixes a socket leak: a failed or timed-out connection attempt now returns the
+    TcpClient so the caller can always close it.
+- CERT04 reads every Subject Alternative Name DNS entry from the raw extension,
+    so multi-name IIS certificates are no longer reported as a name mismatch.
+- Local group membership is resolved through nested groups, and an enumeration
+    that cannot be completed now warns instead of failing CON04 and IIS03.
+- CERT04 warns instead of failing when the IIS HTTPS binding list cannot be
+    enumerated, and application-pool discovery no longer hides that list.
+- Collected IIS logs are prefixed with their site folder so identically named
+    daily logs are no longer overwritten in the diagnostic ZIP.
+- LOC05 parses the HTTP Date header with the invariant culture, so clock-skew
+    detection is correct on every locale.
+- LOC02 and NDES05 read the operating-system version from Win32_OperatingSystem
+    and report the source.
+- NDES08 distinguishes an unprotected endpoint from a connector that has not
+    enabled SCEP yet, and CERT01 separates cross-signed roots from genuinely
+    misplaced intermediates.
+- The diagnostic restores the process-wide ServicePointManager TLS setting and
+    honors an explicit -ErrorAction from the caller.
+- Renames the private Section helper to Write-DiagnosticSection.
+- Keeps the public command, alias, parameters, result IDs, and report schema
+    compatible with 2.2.0.
+
 Version 2.2.0:
 - Tightens NET09 so only a successful client-certificate response containing
     EnrollmentService and RAODJPlusFEGatewayService passes full validation.
