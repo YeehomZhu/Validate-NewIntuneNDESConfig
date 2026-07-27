@@ -482,6 +482,53 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
         }
     }
 
+    It 'renders a Key=Value detail as a labeled field list' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $html = ConvertTo-DetailHtml 'Type=PFXCertificateConnector; Product=; Subject=CN=ndes.contoso.test'
+
+            $html | Should -Match '<dl class="fields">'
+            $html | Should -Match '<dt>Type</dt><dd>PFXCertificateConnector</dd>'
+            # An empty value is marked instead of rendering a blank cell.
+            $html | Should -Match '<dt>Product</dt><dd class="empty">not set</dd>'
+            # Only the first equals sign separates the key from the value.
+            $html | Should -Match '<dt>Subject</dt><dd>CN=ndes.contoso.test</dd>'
+        }
+    }
+
+    It 'keeps prose and pipe-delimited records readable instead of forcing fields' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $events = ConvertTo-DetailHtml '2026-07-27 01:00:00Z ID=1001 Provider=Svc: first | 2026-07-27 02:00:00Z ID=2001 Provider=Svc: second'
+            $mixed = ConvertTo-DetailHtml 'GET https://host/x -> HTTP 200 OK; ClientCertificate=True'
+            $prose = ConvertTo-DetailHtml 'No addresses were returned.'
+
+            # A timestamped event summary must not become a bogus key/value row.
+            $events | Should -Match '<ul class="seg">'
+            $events | Should -Not -Match '<dl class="fields">'
+            ([regex]::Matches($events, '<li>')).Count | Should -Be 2
+
+            $mixed | Should -Match '<p class="line">GET https://host/x -&gt; HTTP 200 OK</p>'
+            $mixed | Should -Match '<dt>ClientCertificate</dt><dd>True</dd>'
+
+            $prose | Should -Be '<p class="line">No addresses were returned.</p>'
+        }
+    }
+
+    It 'turns a multi-sentence action into an ordered checklist' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $steps = ConvertTo-ActionHtml 'A failure reproduces the connector trust error. Check roots, hostname, clock, and CRL access.'
+            $single = ConvertTo-ActionHtml 'Install .NET Framework 4.7.2 or later; the connector targets .NET Framework 4.7.2.'
+
+            $steps | Should -Match '<ol class="steps">'
+            ([regex]::Matches($steps, '<li>')).Count | Should -Be 2
+            # The sentence terminator removed by the split is restored.
+            $steps | Should -Match '<li>A failure reproduces the connector trust error.</li>'
+
+            # A version number must not be mistaken for a sentence boundary.
+            $single | Should -Not -Match '<ol class="steps">'
+            $single | Should -Match '^<p class="line">'
+        }
+    }
+
     It 'writes the HTML report and returns its path' {
         $logPath = Join-Path $TestDrive 'html-smoke.log'
         $htmlPath = Join-Path $TestDrive 'html-smoke.html'

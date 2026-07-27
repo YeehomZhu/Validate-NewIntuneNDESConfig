@@ -208,9 +208,22 @@ function Get-DiagnosticReportStyle {
         '.plan li.fail{border-left-color:var(--fail)}'
         '.plan li.warn{border-left-color:var(--warn)}'
         '.pri{display:inline-block;min-width:24px;color:var(--muted);font-weight:700}'
-        '.plan .d{margin:8px 0 0;color:var(--muted);font-size:13px;overflow-wrap:anywhere}'
-        '.plan .a{margin:6px 0 0;font-size:13px;overflow-wrap:anywhere}'
-        '.plan .lnk{margin:6px 0 0;font-size:12px}'
+        '.plan .lnk{margin:8px 0 0;font-size:12px}'
+        '.block{margin:10px 0 0}'
+        '.lbl{display:block;margin-bottom:4px;font-size:11px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:var(--muted)}'
+        '.body{font-size:13px}'
+        '.line{margin:0 0 4px;overflow-wrap:anywhere}'
+        '.line:last-child{margin-bottom:0}'
+        '.fields{margin:0;display:grid;grid-template-columns:minmax(120px,max-content) 1fr;gap:3px 16px}'
+        '.fields dt{color:var(--muted);overflow-wrap:anywhere}'
+        '.fields dd{margin:0;overflow-wrap:anywhere}'
+        '.fields dd.empty{color:#a19f9d;font-style:italic}'
+        '.seg{margin:0;padding-left:18px}'
+        '.seg li{margin:0 0 8px}'
+        '.seg li:last-child{margin-bottom:0}'
+        '.steps{margin:0;padding-left:20px}'
+        '.steps li{margin:0 0 4px;overflow-wrap:anywhere}'
+        '.steps li:last-child{margin-bottom:0}'
         '.none{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:12px 16px;margin:0}'
         '.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}'
         '.toolbar label{cursor:pointer;border:1px solid var(--line);background:var(--card);border-radius:14px;padding:4px 14px;font-size:12px}'
@@ -220,9 +233,6 @@ function Get-DiagnosticReportStyle {
         '.item.s-fail{border-left-color:var(--fail)}'
         '.item.s-info{border-left-color:var(--info)}'
         '.item .cat{color:var(--muted);font-size:12px;margin:0 6px}'
-        '.kv{margin:8px 0 0;display:grid;grid-template-columns:70px 1fr;gap:3px 12px}'
-        '.kv dt{color:var(--muted);font-size:12px}'
-        '.kv dd{margin:0;font-size:13px;overflow-wrap:anywhere}'
         'footer{margin-top:32px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;overflow-wrap:anywhere}'
         'footer p{margin:2px 0}'
         '#flt-fail:checked ~ .page .item:not(.s-fail){display:none}'
@@ -233,6 +243,89 @@ function Get-DiagnosticReportStyle {
         '#flt-all:focus ~ .page label[for=flt-all],#flt-fail:focus ~ .page label[for=flt-fail],#flt-warn:focus ~ .page label[for=flt-warn],#flt-pass:focus ~ .page label[for=flt-pass],#flt-info:focus ~ .page label[for=flt-info]{outline:2px solid var(--info);outline-offset:2px}'
         '@media print{.toolbar{display:none}.item,.plan li{break-inside:avoid}}'
     ) -join "`n"
+}
+
+# Renders one detail record. A delimited Key=Value summary becomes a labeled
+# field list, and any remaining prose stays on its own line.
+function ConvertTo-DetailSegmentHtml {
+    param([AllowEmptyString()] [string]$Segment)
+
+    $parts = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($chunk in ([string]$Segment -split ';\s*')) {
+        # A comma only separates fields when the next token is itself Key=.
+        foreach ($piece in ($chunk -split ',\s*(?=[A-Za-z][\w .]*=)')) {
+            $trimmed = $piece.Trim()
+            if ($trimmed) { $parts.Add($trimmed) }
+        }
+    }
+
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $rows = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($part in $parts) {
+        # The key must look like a label, so prose such as a timestamped event
+        # summary is kept as a readable line instead of a bogus field.
+        $field = [regex]::Match($part, '^([A-Za-z][\w .()/\\-]{0,48})=(.*)$')
+        if ($field.Success) {
+            $value = $field.Groups[2].Value.Trim()
+            $valueHtml = if ($value) {
+                '<dd>{0}</dd>' -f (ConvertTo-HtmlText $value)
+            } else {
+                '<dd class="empty">not set</dd>'
+            }
+            $rows.Add(('<dt>{0}</dt>{1}' -f (ConvertTo-HtmlText $field.Groups[1].Value.Trim()), $valueHtml))
+        } else {
+            $lines.Add(('<p class="line">{0}</p>' -f (ConvertTo-HtmlText $part)))
+        }
+    }
+
+    if ($rows.Count -eq 0) {
+        return ($lines -join '')
+    }
+    return (($lines -join '') + '<dl class="fields">' + ($rows -join '') + '</dl>')
+}
+
+# Renders a check detail. Pipe-delimited records such as event summaries become
+# a list so each record stays readable on its own.
+function ConvertTo-DetailHtml {
+    param([AllowEmptyString()] [string]$Detail)
+
+    $segments = @([string]$Detail -split '\s\|\s' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($segments.Count -le 1) {
+        return (ConvertTo-DetailSegmentHtml -Segment $Detail)
+    }
+
+    $html = New-Object 'System.Collections.Generic.List[string]'
+    $html.Add('<ul class="seg">')
+    foreach ($segment in $segments) {
+        $html.Add(('<li>{0}</li>' -f (ConvertTo-DetailSegmentHtml -Segment $segment)))
+    }
+    $html.Add('</ul>')
+    return ($html -join '')
+}
+
+# Splits remediation text at sentence boundaries so an action reads as an
+# ordered checklist instead of one dense paragraph.
+function ConvertTo-ActionHtml {
+    param([AllowEmptyString()] [string]$Action)
+
+    $text = ([string]$Action).Trim()
+    if (-not $text) {
+        return ''
+    }
+
+    $steps = @($text -split '(?<=[a-z0-9)\]])\.\s+(?=[A-Z])' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($steps.Count -le 1) {
+        return ('<p class="line">{0}</p>' -f (ConvertTo-HtmlText $text))
+    }
+
+    $html = New-Object 'System.Collections.Generic.List[string]'
+    $html.Add('<ol class="steps">')
+    foreach ($step in $steps) {
+        $sentence = if ($step -match '[.!?]$') { $step } else { "$step." }
+        $html.Add(('<li>{0}</li>' -f (ConvertTo-HtmlText $sentence)))
+    }
+    $html.Add('</ol>')
+    return ($html -join '')
 }
 
 # Builds one self-contained HTML report that shows the overall verdict, the
@@ -338,9 +431,9 @@ function ConvertTo-DiagnosticHtmlReport {
             $html.Add(('<li class="{0}">' -f $itemClass))
             $html.Add(('<div><span class="pri">{0}</span><span class="badge {1}">{2}</span> <code>{3}</code> <h3>{4}</h3>{5}</div>' -f $priority, $itemClass, (ConvertTo-HtmlText ([string]$item.Status).ToUpperInvariant()), (ConvertTo-HtmlText ([string]$item.Id)), (ConvertTo-HtmlText ([string]$item.Name)), $caseTag))
             if ($item.Detail) {
-                $html.Add(('<p class="d">{0}</p>' -f (ConvertTo-HtmlText ([string]$item.Detail))))
+                $html.Add(('<div class="block"><span class="lbl">Detail</span><div class="body">{0}</div></div>' -f (ConvertTo-DetailHtml ([string]$item.Detail))))
             }
-            $html.Add(('<p class="a"><strong>Action:</strong> {0}</p>' -f (ConvertTo-HtmlText $action)))
+            $html.Add(('<div class="block"><span class="lbl">Action</span><div class="body">{0}</div></div>' -f (ConvertTo-ActionHtml $action)))
             $html.Add(('<p class="lnk"><a href="#{0}">Go to the full check result</a></p>' -f $anchor))
             $html.Add('</li>')
         }
@@ -366,14 +459,12 @@ function ConvertTo-DiagnosticHtmlReport {
         $caseTag = if ($item.Case) { '<span class="case">KNOWN CASE</span>' } else { '' }
         $html.Add(('<article class="item s-{0}" id="{1}">' -f $itemClass, $anchor))
         $html.Add(('<div><span class="badge {0}">{1}</span> <code>{2}</code><span class="cat">{3}</span><h3>{4}</h3>{5}</div>' -f $itemClass, (ConvertTo-HtmlText ([string]$item.Status).ToUpperInvariant()), (ConvertTo-HtmlText ([string]$item.Id)), (ConvertTo-HtmlText ([string]$item.Category)), (ConvertTo-HtmlText ([string]$item.Name)), $caseTag))
-        $html.Add('<dl class="kv">')
         if ($item.Detail) {
-            $html.Add(('<dt>Detail</dt><dd>{0}</dd>' -f (ConvertTo-HtmlText ([string]$item.Detail))))
+            $html.Add(('<div class="block"><span class="lbl">Detail</span><div class="body">{0}</div></div>' -f (ConvertTo-DetailHtml ([string]$item.Detail))))
         }
         if ($item.Status -ne 'Pass' -and $item.Remediation) {
-            $html.Add(('<dt>Action</dt><dd>{0}</dd>' -f (ConvertTo-HtmlText ([string]$item.Remediation))))
+            $html.Add(('<div class="block"><span class="lbl">Action</span><div class="body">{0}</div></div>' -f (ConvertTo-ActionHtml ([string]$item.Remediation))))
         }
-        $html.Add('</dl>')
         $html.Add('</article>')
     }
     $html.Add('</section>')

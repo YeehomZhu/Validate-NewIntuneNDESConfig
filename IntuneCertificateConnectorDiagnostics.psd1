@@ -68,6 +68,9 @@ Version 2.4.0:
     with its detail, its remediation, and a link to the full check result.
 - Every check is rendered as a readable card with a status badge, check ID,
     category, detail, and action, plus a CSS-only status filter.
+- A Key=Value detail is laid out as a labeled field list that marks empty
+    values, a pipe-delimited detail such as an event summary becomes one record
+    per line, and a multi-sentence action becomes an ordered checklist.
 - The report embeds its stylesheet, contains no script and no external
     reference, and HTML-encodes all environment data.
 - The structured report object now exposes HtmlReportPath, and -CollectLogs

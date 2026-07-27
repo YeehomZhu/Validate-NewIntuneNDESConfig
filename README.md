@@ -130,6 +130,8 @@ The HTML report opens in any browser with no network access and contains:
 - A color-coded overall verdict plus pass, warning, failure, and informational counts, so status is visible at a glance
 - A prioritized **action plan** that lists every failure before every warning, each with its detail, its remediation, and a link to the full check result
 - One readable card per check with a status badge, check ID, category, detail, and action
+- Structured details: a `Key=Value` summary becomes a labeled field list that marks empty values, and a pipe-delimited detail such as an event summary becomes one record per line
+- Multi-sentence remediation rendered as an ordered checklist
 - A status filter implemented purely in CSS, so the file contains no script and no external reference
 
 ### Step 5: Collect troubleshooting evidence when needed
