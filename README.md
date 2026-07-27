@@ -118,6 +118,20 @@ The final status is one of:
 
 Each warning or failure includes a check ID, observed details, and suggested remediation. Review the transcript path printed at the end of the run for the complete result.
 
+Add `HtmlReport` to also produce a self-contained HTML report next to the transcript:
+
+```powershell
+Test-IntuneCertificateConnector -HtmlReport
+Test-IntuneCertificateConnector -HtmlReport -HtmlReportPath C:\Temp\ConnectorDiagnostic.html
+```
+
+The HTML report opens in any browser with no network access and contains:
+
+- A color-coded overall verdict plus pass, warning, failure, and informational counts, so status is visible at a glance
+- A prioritized **action plan** that lists every failure before every warning, each with its detail, its remediation, and a link to the full check result
+- One readable card per check with a status badge, check ID, category, detail, and action
+- A status filter implemented purely in CSS, so the file contains no script and no external reference
+
 ### Step 5: Collect troubleshooting evidence when needed
 
 Evidence collection is disabled by default. Enable it explicitly when preparing a support investigation:
@@ -161,6 +175,8 @@ The report includes overall status, execution time, transcript and bundle paths,
 | `CollectLogs` | Off | Enables local diagnostic ZIP creation |
 | `DiagnosticBundlePath` | Timestamped ProgramData ZIP | Optional ZIP output path |
 | `IisLogCount` | `3` | Number of recent IIS logs included in the ZIP |
+| `HtmlReport` | Off | Writes a self-contained HTML report with an action plan |
+| `HtmlReportPath` | Transcript path with an `.html` extension | Optional HTML report output path |
 | `PassThru` | Off | Returns one structured report object for automation |
 
 ## What Gets Checked
@@ -209,8 +225,9 @@ When `CollectLogs` is specified, the ZIP can contain:
 - Exported Azure AD Connect Agent Updater, Application, and System logs
 - GPResult HTML
 - Transcript and collection metadata
+- The HTML report, when `HtmlReport` is also specified
 
-> **Sensitive data:** The transcript and ZIP can contain hostnames, account names, certificate details, policy data, and event messages. Store and share them according to your organization's data-handling policy. The script does not upload them.
+> **Sensitive data:** The transcript, HTML report, and ZIP can contain hostnames, account names, certificate details, policy data, and event messages. Store and share them according to your organization's data-handling policy. The script does not upload them.
 
 ## Safety and scope
 
@@ -284,6 +301,7 @@ Special thanks to **Jerry Abouelnasr** for providing the new idea that inspired 
 
 | Version | Notes |
 |---------|-------|
+| 2.4.0 | Added an optional self-contained HTML report with an at-a-glance status summary, a prioritized action plan, and a CSS-only status filter |
 | 2.3.0 | Fixed a socket leak, multi-SAN certificate name matching, nested local-group membership, IIS binding and log collection accuracy, and locale-dependent clock-skew parsing; the run now restores the process-wide TLS setting and honors `-ErrorAction` |
 | 2.2.0 | Tightened authenticated ServiceAddresses and service-map validation; added defensive RUN01 fallback reporting |
 | 2.1.0 | Added Jerry Abouelnasr as co-author; reorganized the PSM1 into functional regions and introduced explicit per-run diagnostic context without changing the public API or result IDs |

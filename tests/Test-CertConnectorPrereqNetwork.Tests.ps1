@@ -28,7 +28,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
     It 'contains a valid PowerShell Gallery module manifest' {
         $moduleInfo = Test-ModuleManifest -Path $manifestPath
         $moduleInfo.Name | Should -Be 'IntuneCertificateConnectorDiagnostics'
-        $moduleInfo.Version | Should -Be ([Version]'2.3.0')
+        $moduleInfo.Version | Should -Be ([Version]'2.4.0')
         $moduleInfo.Guid | Should -Not -Be ([Guid]::Empty)
         $moduleInfo.Author | Should -Be 'Leon Zhu, Jerry Abouelnasr'
         $moduleInfo.Description | Should -Not -BeNullOrEmpty
@@ -227,7 +227,7 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
                 'SkipNdesChecks', 'SkipNetworkChecks', 'SkipEventLogChecks',
                 'TimeoutSeconds', 'EventLookbackDays', 'MaxEvents',
                 'ConnectorStaleHours', 'CollectLogs', 'DiagnosticBundlePath',
-                'IisLogCount', 'PassThru'
+                'IisLogCount', 'HtmlReport', 'HtmlReportPath', 'PassThru'
             )) {
             $parameterNames | Should -Contain $expected
         }
@@ -416,6 +416,92 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
                 Remove-Item $logPath -Force -ErrorAction SilentlyContinue
             }
         }
+    }
+
+    It 'renders a self-contained HTML report with a prioritized action plan' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $context = Initialize-DiagnosticContext -ConnectorType 'PFXCertificateConnector' -BaseAddress 'https://manage.microsoft.com'
+            $results = @(
+                [pscustomobject]@{ Id = 'AAA01'; Category = 'Local'; Name = 'Passing check'; Status = 'Pass'; Detail = 'pass detail'; Remediation = 'hidden for a pass'; Case = $false }
+                [pscustomobject]@{ Id = 'BBB02'; Category = 'Network'; Name = 'Warning check'; Status = 'Warn'; Detail = 'warn detail'; Remediation = 'do the warn fix'; Case = $false }
+                [pscustomobject]@{ Id = 'CCC03'; Category = 'NDES'; Name = 'Failing check'; Status = 'Fail'; Detail = 'fail detail'; Remediation = 'do the fail fix'; Case = $true }
+            )
+            $html = ConvertTo-DiagnosticHtmlReport -Context $context -Overall 'FAIL' -Results $results `
+                -GeneratedAtUtc ([datetime]::UtcNow) -Duration ([timespan]::FromSeconds(2))
+
+            $html | Should -Match '^<!DOCTYPE html>'
+            $html.TrimEnd() | Should -Match '</html>$'
+            $html | Should -Not -Match '<script'
+            $html | Should -Not -Match '(src|href)="https?://'
+            $html | Should -Match '<h2>Action plan</h2>'
+            $html | Should -Match 'KNOWN CASE'
+            $html | Should -Match 'id="chk-AAA01"'
+
+            # Failures are actioned before warnings.
+            $html.IndexOf('do the fail fix') | Should -BeLessThan $html.IndexOf('do the warn fix')
+            # A passing check still gets a card, but never an action entry.
+            $html | Should -Not -Match 'hidden for a pass'
+        }
+    }
+
+    It 'states that no action is required when nothing failed or warned' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $context = Initialize-DiagnosticContext -ConnectorType 'PFXCertificateConnector'
+            $results = @(
+                [pscustomobject]@{ Id = 'AAA01'; Category = 'Local'; Name = 'Passing check'; Status = 'Pass'; Detail = 'pass detail'; Remediation = ''; Case = $false }
+            )
+            $html = ConvertTo-DiagnosticHtmlReport -Context $context -Overall 'PASS' -Results $results `
+                -GeneratedAtUtc ([datetime]::UtcNow) -Duration ([timespan]::FromSeconds(1))
+
+            $html | Should -Match 'no remediation is required'
+            $html | Should -Not -Match '<ol class="plan">'
+        }
+    }
+
+    It 'encodes environment data so the HTML report cannot be injected' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $context = Initialize-DiagnosticContext -ConnectorType 'PFXCertificateConnector'
+            $results = @(
+                [pscustomobject]@{
+                    Id          = 'XSS01'
+                    Category    = 'Certificate'
+                    Name        = '<img src=x onerror=alert(1)>'
+                    Status      = 'Fail'
+                    Detail      = '</style><script>alert("xss")</script>'
+                    Remediation = 'a & b < c > d'
+                    Case        = $false
+                }
+            )
+            $html = ConvertTo-DiagnosticHtmlReport -Context $context -Overall 'FAIL' -Results $results `
+                -GeneratedAtUtc ([datetime]::UtcNow) -Duration ([timespan]::FromSeconds(1))
+
+            $html | Should -Not -Match '<script>'
+            $html | Should -Not -Match '<img '
+            $html | Should -Match '&lt;script&gt;'
+            $html | Should -Match 'a &amp; b &lt; c &gt; d'
+        }
+    }
+
+    It 'writes the HTML report and returns its path' {
+        $logPath = Join-Path $TestDrive 'html-smoke.log'
+        $htmlPath = Join-Path $TestDrive 'html-smoke.html'
+        $report = Test-IntuneCertificateConnector `
+            -SkipNdesChecks -SkipNetworkChecks -SkipEventLogChecks -SkipDynamic `
+            -OutFile $logPath -HtmlReport -HtmlReportPath $htmlPath -PassThru 6>$null
+
+        Test-Path $htmlPath | Should -BeTrue
+        $report.HtmlReportPath | Should -Be $htmlPath
+        (Get-Content $htmlPath -Raw) | Should -Match 'Intune Certificate Connector and NDES diagnostic'
+    }
+
+    It 'omits the HTML report unless it is requested' {
+        $logPath = Join-Path $TestDrive 'no-html.log'
+        $report = Test-IntuneCertificateConnector `
+            -SkipNdesChecks -SkipNetworkChecks -SkipEventLogChecks -SkipDynamic `
+            -OutFile $logPath -PassThru 6>$null
+
+        $report.HtmlReportPath | Should -BeNullOrEmpty
+        Test-Path ([IO.Path]::ChangeExtension($logPath, '.html')) | Should -BeFalse
     }
 
     It 'converts an unexpected runtime exception into a RUN01 report' {

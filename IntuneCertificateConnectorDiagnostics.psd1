@@ -1,6 +1,6 @@
 @{
     RootModule        = 'IntuneCertificateConnectorDiagnostics.psm1'
-    ModuleVersion     = '2.3.0'
+    ModuleVersion     = '2.4.0'
     GUID              = 'bb2983e7-ce6b-4ffe-9a20-84f1c8ed502c'
     Author            = 'Leon Zhu, Jerry Abouelnasr'
     CompanyName       = ''
@@ -15,6 +15,8 @@ Quick start:
 4. Review PASS, PASS-WITH-WARNINGS, or FAIL and the suggested remediation.
 5. Add -CollectLogs to create a troubleshooting ZIP when needed.
 6. Add -PassThru to return a structured report for automation.
+
+Add -HtmlReport to also write a self-contained HTML report that shows the pass, warning, and failure status at a glance and lists a prioritized action plan.
 
 Checks cover Windows and IIS roles, service accounts, certificates, registry configuration, event logs, proxy, DNS, TLS trust, revocation, service-locator connectivity, and automatic updates.
 
@@ -57,6 +59,20 @@ Acknowledgement: Thanks to Jerry Abouelnasr for the feature-detection idea.
             LicenseUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig/blob/master/LICENSE'
             ProjectUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig'
             ReleaseNotes = @'
+Version 2.4.0:
+- Adds -HtmlReport and -HtmlReportPath, which write one self-contained HTML
+    report next to the transcript.
+- The report leads with a color-coded overall verdict and pass, warning,
+    failure, and informational counts so status is visible at a glance.
+- Adds a prioritized action plan that lists every failure before every warning
+    with its detail, its remediation, and a link to the full check result.
+- Every check is rendered as a readable card with a status badge, check ID,
+    category, detail, and action, plus a CSS-only status filter.
+- The report embeds its stylesheet, contains no script and no external
+    reference, and HTML-encodes all environment data.
+- The structured report object now exposes HtmlReportPath, and -CollectLogs
+    packages the HTML report into the diagnostic ZIP.
+
 Version 2.3.0:
 - Fixes a socket leak: a failed or timed-out connection attempt now returns the
     TcpClient so the caller can always close it.

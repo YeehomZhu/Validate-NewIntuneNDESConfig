@@ -40,6 +40,8 @@ function Initialize-DiagnosticContext {
         [switch]$CollectLogs,
         [string]$DiagnosticBundlePath,
         [int]$IisLogCount,
+        [switch]$HtmlReport,
+        [string]$HtmlReportPath,
         [switch]$PassThru
     )
 
@@ -58,6 +60,8 @@ function Initialize-DiagnosticContext {
         CollectLogs             = [bool]$CollectLogs
         DiagnosticBundlePath    = $DiagnosticBundlePath
         IisLogCount             = $IisLogCount
+        HtmlReport              = [bool]$HtmlReport
+        HtmlReportPath          = $HtmlReportPath
         PassThru                = [bool]$PassThru
         ConnKey                 = $null
         InstallFolder           = $null
@@ -157,6 +161,240 @@ function Write-DiagnosticSection {
     Write-Line ("== {0} ==" -f $Title) 'White'
 }
 
+# Escapes text so environment-provided values such as certificate subjects,
+# registry data, and event messages cannot inject markup into the HTML report.
+function ConvertTo-HtmlText {
+    param([AllowNull()] [AllowEmptyString()] [string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return ''
+    }
+    return [Net.WebUtility]::HtmlEncode($Text)
+}
+
+# Returns the stylesheet embedded in the HTML report. It is inlined so the file
+# renders identically on an offline server without any external request.
+function Get-DiagnosticReportStyle {
+    return @(
+        ':root{--pass:#0f7b0f;--warn:#9d5d00;--fail:#c50f1f;--info:#0f6cbd;--ink:#1b1a19;--muted:#605e5c;--line:#e1dfdd;--bg:#f3f2f1;--card:#ffffff}'
+        '*{box-sizing:border-box}'
+        'body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 "Segoe UI",-apple-system,Helvetica,Arial,sans-serif}'
+        '.flt{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;clip:rect(0 0 0 0);clip-path:inset(50%);overflow:hidden;white-space:nowrap}'
+        '.page{max-width:1080px;margin:0 auto;padding:28px 20px 56px}'
+        'h1{margin:0 0 6px;font-size:22px}'
+        'h2{font-size:16px;margin:28px 0 12px;padding-bottom:6px;border-bottom:2px solid var(--line)}'
+        'h3{display:inline;font-size:14px;font-weight:600;margin:0}'
+        '.meta{margin:0;color:var(--muted);font-size:12px;overflow-wrap:anywhere}'
+        '.overall{margin:18px 0;padding:14px 18px;border-radius:6px;font-size:19px;font-weight:600;letter-spacing:.4px;color:#fff}'
+        '.overall.pass{background:var(--pass)}'
+        '.overall.warn{background:var(--warn)}'
+        '.overall.fail{background:var(--fail)}'
+        '.counts{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 18px}'
+        '.count{flex:1 1 110px;background:var(--card);border:1px solid var(--line);border-left-width:5px;border-radius:4px;padding:10px 14px}'
+        '.count .n{display:block;font-size:24px;font-weight:600;line-height:1.2}'
+        '.count .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px}'
+        '.count.fail{border-left-color:var(--fail)}.count.fail .n{color:var(--fail)}'
+        '.count.warn{border-left-color:var(--warn)}.count.warn .n{color:var(--warn)}'
+        '.count.pass{border-left-color:var(--pass)}.count.pass .n{color:var(--pass)}'
+        '.count.info{border-left-color:var(--info)}.count.info .n{color:var(--info)}'
+        '.count.total{border-left-color:var(--muted)}'
+        '.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;letter-spacing:.5px;color:#fff}'
+        '.badge.pass{background:var(--pass)}.badge.warn{background:var(--warn)}.badge.fail{background:var(--fail)}.badge.info{background:var(--info)}'
+        '.case{display:inline-block;margin-left:8px;padding:1px 7px;border:1px solid var(--warn);color:var(--warn);border-radius:10px;font-size:10px;font-weight:700}'
+        '.case-note{background:#fff4ce;border:1px solid #f2d98c;border-radius:4px;padding:10px 14px;margin:0 0 18px;font-size:13px}'
+        'code{font-family:Consolas,"Courier New",monospace;background:#edebe9;padding:1px 5px;border-radius:3px;font-size:12px}'
+        '.plan{list-style:none;margin:0;padding:0}'
+        '.plan li{background:var(--card);border:1px solid var(--line);border-left-width:5px;border-radius:4px;padding:12px 16px;margin:0 0 10px}'
+        '.plan li.fail{border-left-color:var(--fail)}'
+        '.plan li.warn{border-left-color:var(--warn)}'
+        '.pri{display:inline-block;min-width:24px;color:var(--muted);font-weight:700}'
+        '.plan .d{margin:8px 0 0;color:var(--muted);font-size:13px;overflow-wrap:anywhere}'
+        '.plan .a{margin:6px 0 0;font-size:13px;overflow-wrap:anywhere}'
+        '.plan .lnk{margin:6px 0 0;font-size:12px}'
+        '.none{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:12px 16px;margin:0}'
+        '.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}'
+        '.toolbar label{cursor:pointer;border:1px solid var(--line);background:var(--card);border-radius:14px;padding:4px 14px;font-size:12px}'
+        '.item{background:var(--card);border:1px solid var(--line);border-left-width:5px;border-radius:4px;padding:12px 16px;margin:0 0 8px}'
+        '.item.s-pass{border-left-color:var(--pass)}'
+        '.item.s-warn{border-left-color:var(--warn)}'
+        '.item.s-fail{border-left-color:var(--fail)}'
+        '.item.s-info{border-left-color:var(--info)}'
+        '.item .cat{color:var(--muted);font-size:12px;margin:0 6px}'
+        '.kv{margin:8px 0 0;display:grid;grid-template-columns:70px 1fr;gap:3px 12px}'
+        '.kv dt{color:var(--muted);font-size:12px}'
+        '.kv dd{margin:0;font-size:13px;overflow-wrap:anywhere}'
+        'footer{margin-top:32px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;overflow-wrap:anywhere}'
+        'footer p{margin:2px 0}'
+        '#flt-fail:checked ~ .page .item:not(.s-fail){display:none}'
+        '#flt-warn:checked ~ .page .item:not(.s-warn){display:none}'
+        '#flt-pass:checked ~ .page .item:not(.s-pass){display:none}'
+        '#flt-info:checked ~ .page .item:not(.s-info){display:none}'
+        '#flt-all:checked ~ .page label[for=flt-all],#flt-fail:checked ~ .page label[for=flt-fail],#flt-warn:checked ~ .page label[for=flt-warn],#flt-pass:checked ~ .page label[for=flt-pass],#flt-info:checked ~ .page label[for=flt-info]{background:var(--ink);color:#fff;border-color:var(--ink)}'
+        '#flt-all:focus ~ .page label[for=flt-all],#flt-fail:focus ~ .page label[for=flt-fail],#flt-warn:focus ~ .page label[for=flt-warn],#flt-pass:focus ~ .page label[for=flt-pass],#flt-info:focus ~ .page label[for=flt-info]{outline:2px solid var(--info);outline-offset:2px}'
+        '@media print{.toolbar{display:none}.item,.plan li{break-inside:avoid}}'
+    ) -join "`n"
+}
+
+# Builds one self-contained HTML report that shows the overall verdict, the
+# pass/warn/fail counts, a prioritized action plan, and every check result.
+function ConvertTo-DiagnosticHtmlReport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context,
+        [Parameter(Mandatory = $true)]
+        [string]$Overall,
+        [object[]]$Results,
+        [datetime]$GeneratedAtUtc,
+        [timespan]$Duration,
+        [AllowEmptyString()] [string]$TranscriptPath = '',
+        [AllowEmptyString()] [string]$DiagnosticBundlePath = ''
+    )
+
+    $checks = @($Results)
+    $failures = @($checks | Where-Object { $_.Status -eq 'Fail' })
+    $warnings = @($checks | Where-Object { $_.Status -eq 'Warn' })
+    $passes = @($checks | Where-Object { $_.Status -eq 'Pass' })
+    $information = @($checks | Where-Object { $_.Status -eq 'Info' })
+    $caseFindings = @($checks | Where-Object { $_.Case -and $_.Status -in @('Fail', 'Warn') })
+
+    $statusClass = @{ Pass = 'pass'; Warn = 'warn'; Fail = 'fail'; Info = 'info' }
+    $overallClass = switch ($Overall) {
+        'PASS' { 'pass' }
+        'FAIL' { 'fail' }
+        default { 'warn' }
+    }
+    $overallLabel = switch ($Overall) {
+        'PASS' { 'PASS - no failures or warnings were reported' }
+        'FAIL' { 'FAIL - action is required before the connector can work reliably' }
+        default { 'PASS WITH WARNINGS - review the action plan below' }
+    }
+
+    $html = New-Object 'System.Collections.Generic.List[string]'
+    $html.Add('<!DOCTYPE html>')
+    $html.Add('<html lang="en">')
+    $html.Add('<head>')
+    $html.Add('<meta charset="utf-8">')
+    $html.Add('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    $html.Add(('<title>{0}</title>' -f (ConvertTo-HtmlText ("Certificate Connector diagnostic - {0} - {1}" -f $env:COMPUTERNAME, $Overall))))
+    $html.Add('<style>')
+    $html.Add((Get-DiagnosticReportStyle))
+    $html.Add('</style>')
+    $html.Add('</head>')
+    $html.Add('<body>')
+    foreach ($filterName in @('all', 'fail', 'warn', 'pass', 'info')) {
+        $checkedAttribute = if ($filterName -eq 'all') { ' checked' } else { '' }
+        $html.Add(('<input type="radio" class="flt" name="statusfilter" id="flt-{0}"{1}>' -f $filterName, $checkedAttribute))
+    }
+    $html.Add('<div class="page">')
+
+    $html.Add('<header>')
+    $html.Add('<h1>Intune Certificate Connector and NDES diagnostic</h1>')
+    $metaParts = @(
+        ("Host {0}" -f $env:COMPUTERNAME)
+        ("User {0}\{1}" -f $env:USERDOMAIN, $env:USERNAME)
+        ("Generated {0:yyyy-MM-dd HH:mm:ss}Z" -f $GeneratedAtUtc)
+        ("Duration {0:N1}s" -f $Duration.TotalSeconds)
+        ("ConnectorType {0}" -f $Context.ConnectorType)
+        ("Base {0}" -f $Context.BaseAddress)
+    )
+    $html.Add(('<p class="meta">{0}</p>' -f (ConvertTo-HtmlText ($metaParts -join '   |   '))))
+    $html.Add(('<div class="overall {0}">{1}</div>' -f $overallClass, (ConvertTo-HtmlText $overallLabel)))
+    $html.Add('</header>')
+
+    $html.Add('<section class="counts">')
+    foreach ($count in @(
+            @{ Class = 'fail'; Label = 'Fail'; Value = $failures.Count }
+            @{ Class = 'warn'; Label = 'Warn'; Value = $warnings.Count }
+            @{ Class = 'pass'; Label = 'Pass'; Value = $passes.Count }
+            @{ Class = 'info'; Label = 'Info'; Value = $information.Count }
+            @{ Class = 'total'; Label = 'Total'; Value = $checks.Count }
+        )) {
+        $html.Add(('<div class="count {0}"><span class="n">{1}</span><span class="l">{2}</span></div>' -f $count.Class, $count.Value, $count.Label))
+    }
+    $html.Add('</section>')
+
+    if ($caseFindings.Count -gt 0) {
+        $caseText = "{0} finding(s) match incident 51000001082135: the connector service-locator call fails or stalls, and setup can then misreport Win32 1056 (an instance of the service is already running)." -f $caseFindings.Count
+        $html.Add(('<p class="case-note">{0}</p>' -f (ConvertTo-HtmlText $caseText)))
+    }
+
+    $html.Add('<h2>Action plan</h2>')
+    $planItems = @($failures) + @($warnings)
+    if ($planItems.Count -eq 0) {
+        $html.Add('<p class="none">No failures or warnings were reported, so no remediation is required. Review the informational results below to confirm the expected configuration.</p>')
+    } else {
+        $html.Add('<ol class="plan">')
+        $priority = 0
+        foreach ($item in $planItems) {
+            $priority++
+            $itemClass = $statusClass[[string]$item.Status]
+            $anchor = 'chk-' + ([string]$item.Id -replace '[^A-Za-z0-9]', '-')
+            $action = if ($item.Remediation) {
+                [string]$item.Remediation
+            } else {
+                'Review the detail above and the matching transcript entry, then correct the reported configuration.'
+            }
+            $caseTag = if ($item.Case) { '<span class="case">KNOWN CASE</span>' } else { '' }
+            $html.Add(('<li class="{0}">' -f $itemClass))
+            $html.Add(('<div><span class="pri">{0}</span><span class="badge {1}">{2}</span> <code>{3}</code> <h3>{4}</h3>{5}</div>' -f $priority, $itemClass, (ConvertTo-HtmlText ([string]$item.Status).ToUpperInvariant()), (ConvertTo-HtmlText ([string]$item.Id)), (ConvertTo-HtmlText ([string]$item.Name)), $caseTag))
+            if ($item.Detail) {
+                $html.Add(('<p class="d">{0}</p>' -f (ConvertTo-HtmlText ([string]$item.Detail))))
+            }
+            $html.Add(('<p class="a"><strong>Action:</strong> {0}</p>' -f (ConvertTo-HtmlText $action)))
+            $html.Add(('<p class="lnk"><a href="#{0}">Go to the full check result</a></p>' -f $anchor))
+            $html.Add('</li>')
+        }
+        $html.Add('</ol>')
+    }
+
+    $html.Add('<h2>All check results</h2>')
+    $html.Add('<div class="toolbar">')
+    foreach ($filter in @(
+            @{ Id = 'all'; Label = 'All'; Value = $checks.Count }
+            @{ Id = 'fail'; Label = 'Fail'; Value = $failures.Count }
+            @{ Id = 'warn'; Label = 'Warn'; Value = $warnings.Count }
+            @{ Id = 'pass'; Label = 'Pass'; Value = $passes.Count }
+            @{ Id = 'info'; Label = 'Info'; Value = $information.Count }
+        )) {
+        $html.Add(('<label for="flt-{0}">{1} ({2})</label>' -f $filter.Id, (ConvertTo-HtmlText $filter.Label), $filter.Value))
+    }
+    $html.Add('</div>')
+    $html.Add('<section class="results">')
+    foreach ($item in $checks) {
+        $itemClass = $statusClass[[string]$item.Status]
+        $anchor = 'chk-' + ([string]$item.Id -replace '[^A-Za-z0-9]', '-')
+        $caseTag = if ($item.Case) { '<span class="case">KNOWN CASE</span>' } else { '' }
+        $html.Add(('<article class="item s-{0}" id="{1}">' -f $itemClass, $anchor))
+        $html.Add(('<div><span class="badge {0}">{1}</span> <code>{2}</code><span class="cat">{3}</span><h3>{4}</h3>{5}</div>' -f $itemClass, (ConvertTo-HtmlText ([string]$item.Status).ToUpperInvariant()), (ConvertTo-HtmlText ([string]$item.Id)), (ConvertTo-HtmlText ([string]$item.Category)), (ConvertTo-HtmlText ([string]$item.Name)), $caseTag))
+        $html.Add('<dl class="kv">')
+        if ($item.Detail) {
+            $html.Add(('<dt>Detail</dt><dd>{0}</dd>' -f (ConvertTo-HtmlText ([string]$item.Detail))))
+        }
+        if ($item.Status -ne 'Pass' -and $item.Remediation) {
+            $html.Add(('<dt>Action</dt><dd>{0}</dd>' -f (ConvertTo-HtmlText ([string]$item.Remediation))))
+        }
+        $html.Add('</dl>')
+        $html.Add('</article>')
+    }
+    $html.Add('</section>')
+
+    $html.Add('<footer>')
+    if ($TranscriptPath) {
+        $html.Add(('<p>Transcript: {0}</p>' -f (ConvertTo-HtmlText $TranscriptPath)))
+    }
+    if ($DiagnosticBundlePath) {
+        $html.Add(('<p>Diagnostic bundle: {0}</p>' -f (ConvertTo-HtmlText $DiagnosticBundlePath)))
+    }
+    $html.Add('<p>Read-only diagnostic output. This report can contain hostnames, account names, certificate subjects, policy data, and event messages, so handle it as operational data.</p>')
+    $html.Add('</footer>')
+
+    $html.Add('</div>')
+    $html.Add('</body>')
+    $html.Add('</html>')
+
+    return ($html -join "`r`n")
+}
+
 #endregion Output and Formatting
 
 #region Diagnostic Phase Orchestration
@@ -230,6 +468,7 @@ function Complete-UnhandledDiagnosticFailure {
                 }
                 TranscriptPath       = $outFile
                 DiagnosticBundlePath = $null
+                HtmlReportPath       = $null
                 Results              = $script:Results.ToArray()
             })
     }
@@ -255,6 +494,8 @@ function Invoke-Finalization {
     $CollectLogs = $Context.CollectLogs
     $DiagnosticBundlePath = $Context.DiagnosticBundlePath
     $IisLogCount = $Context.IisLogCount
+    $HtmlReport = $Context.HtmlReport
+    $HtmlReportPath = $Context.HtmlReportPath
     $PassThru = $Context.PassThru
     $connectorServiceNames = $Context.ConnectorServiceNames
 
@@ -453,6 +694,41 @@ try {
     Write-Line "  Could not write transcript: $($_.Exception.Message)" 'Yellow'
 }
 
+# Optional HTML report. It is produced before the ZIP so the archive can carry it.
+$htmlWrittenPath = $null
+if ($HtmlReport) {
+    $htmlTarget = $HtmlReportPath
+    if ([string]::IsNullOrWhiteSpace($htmlTarget)) {
+        $htmlTarget = [IO.Path]::ChangeExtension($OutFile, '.html')
+    } elseif ([IO.Path]::GetExtension($htmlTarget) -notin @('.html', '.htm')) {
+        $htmlTarget = "$htmlTarget.html"
+    }
+    $htmlParent = Split-Path -Parent $htmlTarget
+    if ($htmlParent) {
+        try { $null = New-Item -ItemType Directory -Path $htmlParent -Force -ErrorAction Stop } catch {}
+    }
+    try {
+        $htmlContent = ConvertTo-DiagnosticHtmlReport `
+            -Context $Context `
+            -Overall $overall `
+            -Results $script:Results.ToArray() `
+            -GeneratedAtUtc ((Get-Date).ToUniversalTime()) `
+            -Duration ((Get-Date).ToUniversalTime() - $script:StartedAtUtc) `
+            -TranscriptPath $(if ($transcriptWritten) { $OutFile } else { '' }) `
+            -DiagnosticBundlePath $(if ($CollectLogs) { [string]$script:BundleTarget } else { '' })
+        Set-Content -Path $htmlTarget -Value $htmlContent -Encoding UTF8 -ErrorAction Stop
+        $htmlWrittenPath = $htmlTarget
+        Write-Line "  HTML report: $htmlTarget" 'Cyan'
+        if ($CollectLogs -and $script:BundleStage -and (Test-Path $script:BundleStage)) {
+            try {
+                Copy-Item -Path $htmlTarget -Destination (Join-Path $script:BundleStage 'DiagnosticReport.html') -Force -ErrorAction Stop
+            } catch {}
+        }
+    } catch {
+        Write-Line "  Could not write the HTML report: $($_.Exception.Message)" 'Yellow'
+    }
+}
+
 # Finalize the optional ZIP only after the transcript exists.
 if ($CollectLogs -and $script:BundleStage -and (Test-Path $script:BundleStage)) {
     try {
@@ -468,11 +744,13 @@ if ($CollectLogs -and $script:BundleStage -and (Test-Path $script:BundleStage)) 
     } finally {
         Remove-Item -Path $script:BundleStage -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if ($transcriptWritten) {
-        try { Set-Content -Path $OutFile -Value ($transcriptHeader + $script:Transcript) -Encoding UTF8 -ErrorAction Stop } catch {}
-    }
 } elseif ($script:BundleStage -and (Test-Path $script:BundleStage)) {
     Remove-Item -Path $script:BundleStage -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Rewrite the transcript so it also records the HTML report and bundle outcome.
+if ($transcriptWritten) {
+    try { Set-Content -Path $OutFile -Value ($transcriptHeader + $script:Transcript) -Encoding UTF8 -ErrorAction Stop } catch {}
 }
 
 # Return one structured report only when explicitly requested. A normal one-time
@@ -494,6 +772,7 @@ if ($PassThru) {
         }
         TranscriptPath       = if ($transcriptWritten) { $OutFile } else { $null }
         DiagnosticBundlePath = if ($script:BundleTarget -and (Test-Path $script:BundleTarget)) { $script:BundleTarget } else { $null }
+        HtmlReportPath       = $htmlWrittenPath
         Results              = $script:Results.ToArray()
     }
     Write-Output $report
@@ -1890,11 +2169,22 @@ function Initialize-DiagnosticCollection {
 .PARAMETER IisLogCount
     Number of recent IIS logs to collect. Default is three.
 
+.PARAMETER HtmlReport
+    Writes a self-contained HTML report with an at-a-glance status summary and a
+    prioritized action plan. Defaults to the transcript path with an .html extension.
+
+.PARAMETER HtmlReportPath
+    Optional destination for the HTML report. Implies HtmlReport is meaningful only
+    when HtmlReport is also specified.
+
 .PARAMETER PassThru
     Returns one Intune.CertificateConnector.DiagnosticReport object.
 
 .EXAMPLE
     Test-IntuneCertificateConnector
+
+.EXAMPLE
+    Test-IntuneCertificateConnector -HtmlReport
 
 .EXAMPLE
     $report = Test-IntuneCertificateConnector -PassThru
@@ -1930,6 +2220,8 @@ function Test-IntuneCertificateConnector {
         [switch]$CollectLogs,
         [string]$DiagnosticBundlePath,
         [ValidateRange(1, 100)] [int]$IisLogCount = 3,
+        [switch]$HtmlReport,
+        [string]$HtmlReportPath,
         [switch]$PassThru
     )
 
@@ -1968,6 +2260,8 @@ function Test-IntuneCertificateConnector {
             -CollectLogs:$CollectLogs `
             -DiagnosticBundlePath $DiagnosticBundlePath `
             -IisLogCount $IisLogCount `
+            -HtmlReport:$HtmlReport `
+            -HtmlReportPath $HtmlReportPath `
             -PassThru:$PassThru
 
     #region Phase 1 - Configuration Discovery
