@@ -28,7 +28,7 @@ Describe 'IntuneCertificateConnectorDiagnostics static validation' {
     It 'contains a valid PowerShell Gallery module manifest' {
         $moduleInfo = Test-ModuleManifest -Path $manifestPath
         $moduleInfo.Name | Should -Be 'IntuneCertificateConnectorDiagnostics'
-        $moduleInfo.Version | Should -Be ([Version]'2.4.0')
+        $moduleInfo.Version | Should -Be ([Version]'2.4.1')
         $moduleInfo.Guid | Should -Not -Be ([Guid]::Empty)
         $moduleInfo.Author | Should -Be 'Leon Zhu, Jerry Abouelnasr'
         $moduleInfo.Description | Should -Not -BeNullOrEmpty
@@ -549,6 +549,131 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
 
         $report.HtmlReportPath | Should -BeNullOrEmpty
         Test-Path ([IO.Path]::ChangeExtension($logPath, '.html')) | Should -BeFalse
+    }
+
+    It 'resolves requested Windows features without discarding the whole query' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            # ServerManager is absent on a client OS, so stand in for the cmdlet
+            # that the availability probe looks for.
+            function Get-WindowsFeature { param([string[]]$Name) $null = $Name }
+            Mock Get-WindowsFeature {
+                @(
+                    [pscustomobject]@{ Name = 'Web-Server'; Installed = $true }
+                    [pscustomobject]@{ Name = 'Web-WMI'; Installed = $false }
+                )
+            }
+
+            $script:WindowsFeatureInventory = $null
+            $script:WindowsFeatureError = $null
+            try {
+                $state = Get-WindowsFeatureState @('Web-Server', 'Web-WMI', 'NoSuchFeature')
+
+                $state.Available | Should -BeTrue
+                $state.Error | Should -BeNullOrEmpty
+                $state.Installed | Should -Be @('Web-Server')
+                $state.NotInstalled | Should -Be @('Web-WMI')
+                # A name this OS never offers must not be reported as missing.
+                $state.Unknown | Should -Be @('NoSuchFeature')
+
+                # The inventory is read once per run, not once per query.
+                $null = Get-WindowsFeatureState @('Web-Server')
+                Should -Invoke Get-WindowsFeature -Times 1 -Exactly
+            } finally {
+                $script:WindowsFeatureInventory = $null
+            }
+        }
+    }
+
+    It 'warns instead of failing for a least-privileged connector account' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            Mock Get-ServiceDetail {
+                if ($Name -ne 'PFXCertificateConnectorSvc') { return $null }
+                [pscustomobject]@{
+                    Name = $Name; Status = 'Running'; StartName = 'CONTOSO\svcConnector'
+                    StartMode = 'Auto'; ProcessId = 4242; StartedUtc = [datetime]::UtcNow
+                }
+            }
+            Mock Test-AccountUserRight { [pscustomobject]@{ Known = $true; HasRight = $true; Error = $null } }
+            Mock Test-LocalGroupMembershipBySid {
+                [pscustomobject]@{ Known = $true; IsMember = $false; GroupName = 'Administrators'; Error = $null }
+            }
+
+            $logPath = Join-Path ([IO.Path]::GetTempPath()) ("con04-lp-{0}.log" -f [guid]::NewGuid())
+            try {
+                $report = Test-IntuneCertificateConnector `
+                    -SkipNdesChecks -SkipNetworkChecks -SkipEventLogChecks -SkipDynamic `
+                    -OutFile $logPath -PassThru 6>$null
+
+                $accounts = @($report.Results | Where-Object Id -like 'CON04:*')
+                $accounts.Count | Should -Be 1
+                $accounts[0].Status | Should -Be 'Warn'
+                $accounts[0].Detail | Should -Match 'not a local administrator'
+            } finally {
+                Remove-Item $logPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'fails a connector account only when the logon right is absent and nothing runs' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            Mock Test-AccountUserRight { [pscustomobject]@{ Known = $true; HasRight = $false; Error = $null } }
+            Mock Test-LocalGroupMembershipBySid {
+                [pscustomobject]@{ Known = $true; IsMember = $true; GroupName = 'Administrators'; Error = $null }
+            }
+            $serviceStatus = 'Stopped'
+            Mock Get-ServiceDetail {
+                if ($Name -ne 'PFXCertificateConnectorSvc') { return $null }
+                [pscustomobject]@{
+                    Name = $Name; Status = $serviceStatus; StartName = 'CONTOSO\svcConnector'
+                    StartMode = 'Auto'; ProcessId = 0; StartedUtc = $null
+                }
+            }
+
+            $logPath = Join-Path ([IO.Path]::GetTempPath()) ("con04-fail-{0}.log" -f [guid]::NewGuid())
+            try {
+                $stopped = Test-IntuneCertificateConnector `
+                    -SkipNdesChecks -SkipNetworkChecks -SkipEventLogChecks -SkipDynamic `
+                    -OutFile $logPath -PassThru 6>$null
+                @($stopped.Results | Where-Object Id -like 'CON04:*')[0].Status | Should -Be 'Fail'
+
+                # A running service proves the right is granted through a group.
+                $serviceStatus = 'Running'
+                $running = Test-IntuneCertificateConnector `
+                    -SkipNdesChecks -SkipNetworkChecks -SkipEventLogChecks -SkipDynamic `
+                    -OutFile $logPath -PassThru 6>$null
+                @($running.Results | Where-Object Id -like 'CON04:*')[0].Status | Should -Be 'Warn'
+            } finally {
+                Remove-Item $logPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'passes a built-in connector service account without probing rights' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            Mock Get-ServiceDetail {
+                if ($Name -ne 'PFXCertificateConnectorSvc') { return $null }
+                [pscustomobject]@{
+                    Name = $Name; Status = 'Running'; StartName = 'LocalSystem'
+                    StartMode = 'Auto'; ProcessId = 4242; StartedUtc = [datetime]::UtcNow
+                }
+            }
+            Mock Test-AccountUserRight { throw 'secedit must not run for a built-in account' }
+            Mock Test-LocalGroupMembershipBySid { throw 'group enumeration must not run for a built-in account' }
+
+            $logPath = Join-Path ([IO.Path]::GetTempPath()) ("con04-system-{0}.log" -f [guid]::NewGuid())
+            try {
+                $report = Test-IntuneCertificateConnector `
+                    -SkipNdesChecks -SkipNetworkChecks -SkipEventLogChecks -SkipDynamic `
+                    -OutFile $logPath -PassThru 6>$null
+
+                $accounts = @($report.Results | Where-Object Id -like 'CON04:*')
+                $accounts[0].Status | Should -Be 'Pass'
+                $accounts[0].Detail | Should -Match 'BuiltInAccount=True'
+                Should -Invoke Test-AccountUserRight -Times 0
+            } finally {
+                Remove-Item $logPath -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     It 'converts an unexpected runtime exception into a RUN01 report' {

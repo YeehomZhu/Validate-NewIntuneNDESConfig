@@ -1424,21 +1424,72 @@ function Get-FullyQualifiedHostName {
     }
 }
 
-# Queries requested Windows Server roles/features and returns availability,
-# feature objects, and any query error in a consistent result object.
+# Resolves requested Windows Server roles/features against the full inventory,
+# which is read once per run. Querying by name would abort the whole call when a
+# single name does not exist on this OS, so the inventory is filtered locally and
+# a name that is not installed is reported separately from one this OS never had.
 function Get-WindowsFeatureState {
     param([string[]]$Names)
 
+    $requested = @($Names)
     $command = Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue
     if (-not $command) {
-        return [pscustomobject]@{ Available = $false; Features = @(); Error = 'Get-WindowsFeature is unavailable.' }
+        return [pscustomobject]@{
+            Available    = $false
+            Features     = @()
+            Installed    = @()
+            NotInstalled = @()
+            Unknown      = $requested
+            Error        = 'Get-WindowsFeature is unavailable.'
+        }
     }
 
-    try {
-        $features = @(Get-WindowsFeature -Name $Names -ErrorAction Stop)
-        return [pscustomobject]@{ Available = $true; Features = $features; Error = $null }
-    } catch {
-        return [pscustomobject]@{ Available = $true; Features = @(); Error = $_.Exception.Message }
+    if ($null -eq $script:WindowsFeatureInventory) {
+        try {
+            $script:WindowsFeatureInventory = @(Get-WindowsFeature -ErrorAction Stop)
+            $script:WindowsFeatureError = $null
+        } catch {
+            $script:WindowsFeatureInventory = @()
+            $script:WindowsFeatureError = $_.Exception.Message
+        }
+    }
+    if ($script:WindowsFeatureError) {
+        return [pscustomobject]@{
+            Available    = $true
+            Features     = @()
+            Installed    = @()
+            NotInstalled = @()
+            Unknown      = @()
+            Error        = $script:WindowsFeatureError
+        }
+    }
+
+    $index = @{}
+    foreach ($feature in $script:WindowsFeatureInventory) {
+        $index[[string]$feature.Name] = $feature
+    }
+
+    $matched = @()
+    $installed = @()
+    $notInstalled = @()
+    $unknown = @()
+    foreach ($name in $requested) {
+        if (-not $index.ContainsKey($name)) {
+            $unknown += $name
+            continue
+        }
+        $feature = $index[$name]
+        $matched += $feature
+        if ($feature.Installed) { $installed += $name } else { $notInstalled += $name }
+    }
+
+    return [pscustomobject]@{
+        Available    = $true
+        Features     = $matched
+        Installed    = $installed
+        NotInstalled = $notInstalled
+        Unknown      = $unknown
+        Error        = $null
     }
 }
 
@@ -2335,6 +2386,8 @@ function Test-IntuneCertificateConnector {
         $script:BundleTarget = $null
         $script:capturedCertificateBytes = $null
         $script:capturedPolicyErrors = $null
+        $script:WindowsFeatureInventory = $null
+        $script:WindowsFeatureError = $null
 
         $context = Initialize-DiagnosticContext `
             -ConnectorType $ConnectorType `
@@ -2646,24 +2699,56 @@ if ($connectorAccounts.Count -eq 0) {
     $accountIndex = 0
     foreach ($connectorAccount in $connectorAccounts) {
         $accountIndex++
-        $isSystem = $connectorAccount -in @('LocalSystem', 'NT AUTHORITY\SYSTEM', '.\LocalSystem')
-        $right = Test-AccountUserRight -AccountName $connectorAccount
-        $adminMembership = Test-LocalGroupMembershipBySid -AccountName $connectorAccount -GroupSid 'S-1-5-32-544'
-        $accountStatus = if ($isSystem) {
-            'Pass'
-        } elseif ($right.Known -and -not $right.HasRight) {
-            'Fail'
-        } elseif ($adminMembership.Known -and -not $adminMembership.IsMember) {
-            'Fail'
-        } elseif (-not $right.Known -or -not $adminMembership.Known) {
-            'Warn'
+        $accountSid = Resolve-AccountSid $connectorAccount
+        $isBuiltIn = ($connectorAccount -in @(
+                'LocalSystem', '.\LocalSystem', 'NT AUTHORITY\SYSTEM',
+                'LocalService', 'NT AUTHORITY\LOCAL SERVICE',
+                'NetworkService', 'NT AUTHORITY\NETWORK SERVICE'
+            )) -or ($accountSid -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20'))
+        # A running service proves the account can log on as a service even when
+        # the right is granted through a group that secedit does not expand.
+        $serviceRunning = @($connectorServices | Where-Object {
+                $_.StartName -eq $connectorAccount -and $_.Status -eq 'Running'
+            }).Count -gt 0
+        $right = if ($isBuiltIn) { $null } else { Test-AccountUserRight -AccountName $connectorAccount }
+        $adminMembership = if ($isBuiltIn) { $null } else { Test-LocalGroupMembershipBySid -AccountName $connectorAccount -GroupSid 'S-1-5-32-544' }
+
+        if ($isBuiltIn) {
+            $accountStatus = 'Pass'
+            $accountNote = 'Built-in service account; the required logon right is inherent.'
+        } elseif ($right.Known -and -not $right.HasRight -and -not $serviceRunning) {
+            $accountStatus = 'Fail'
+            $accountNote = 'Log on as a service is not assigned to this account and no service using it is running.'
+        } elseif (-not $right.Known) {
+            $accountStatus = 'Warn'
+            $accountNote = 'Log on as a service could not be verified.'
+        } elseif (-not $right.HasRight) {
+            $accountStatus = 'Warn'
+            $accountNote = 'Log on as a service is not assigned directly, but a running service indicates it is granted through a group.'
+        } elseif (-not $adminMembership.Known) {
+            $accountStatus = 'Warn'
+            $accountNote = 'Local administrator membership could not be verified.'
+        } elseif (-not $adminMembership.IsMember) {
+            $accountStatus = 'Warn'
+            $accountNote = 'The account is not a local administrator. That is supported, but confirm it holds the CA and certificate-template permissions the connector needs.'
         } else {
-            'Pass'
+            $accountStatus = 'Pass'
+            $accountNote = ''
         }
+
+        $accountErrors = @($right.Error, $adminMembership.Error) | Where-Object { $_ }
         Add-Result -Id ("CON04:{0}" -f $accountIndex) -Category Connector -Name "Connector account $connectorAccount" `
             -Status $accountStatus `
-            -Detail ("LocalSystem={0}; SeServiceLogonRight={1}/{2}; LocalAdministrators={3}/{4}; Errors={5} {6}" -f $isSystem, $right.Known, $right.HasRight, $adminMembership.Known, $adminMembership.IsMember, $right.Error, $adminMembership.Error) `
-            -Remediation 'Supported connector identities are LocalSystem or a domain account with Log on as a service and local administrator permissions, plus the required CA/template permissions.'
+            -Detail ("BuiltInAccount={0}; ServiceRunning={1}; SeServiceLogonRightKnown={2}; SeServiceLogonRight={3}; LocalAdministratorsKnown={4}; LocalAdministrators={5}; Note={6}; Errors={7}" -f `
+                    $isBuiltIn,
+                    $serviceRunning,
+                $(if ($isBuiltIn) { 'n/a' } else { $right.Known }),
+                $(if ($isBuiltIn) { 'n/a' } else { $right.HasRight }),
+                $(if ($isBuiltIn) { 'n/a' } else { $adminMembership.Known }),
+                $(if ($isBuiltIn) { 'n/a' } else { $adminMembership.IsMember }),
+                $(if ($accountNote) { $accountNote } else { 'All account prerequisites are satisfied.' }),
+                $(if ($accountErrors.Count) { $accountErrors -join ' | ' } else { '<none>' })) `
+            -Remediation 'Supported connector identities are LocalSystem or a domain account that holds Log on as a service. Local administrator membership is common but not required; the account must hold the documented CA and certificate-template permissions.'
     }
 }
 
@@ -2732,22 +2817,39 @@ if ($SkipNdesChecks) {
         'NET-WCF-HTTP-Activation45',
         'Web-Mgmt-Console',
         'Web-Metabase',
-        'Web-WMI',
+        'Web-WMI'
+    )
+    # Older NDES guidance also lists the .NET Framework 3.5 features, but the
+    # Certificate Connector targets .NET Framework 4.7.2, so their absence warns
+    # instead of failing the check.
+    $optionalFeatureNames = @(
         'NET-Framework-Features',
         'NET-HTTP-Activation'
     )
-    $featureState = Get-WindowsFeatureState $requiredFeatureNames
-    $missingFeatures = @()
-    if ($featureState.Available -and -not $featureState.Error) {
-        foreach ($requiredName in $requiredFeatureNames) {
-            $feature = $featureState.Features | Where-Object { $_.Name -eq $requiredName } | Select-Object -First 1
-            if (-not $feature -or -not $feature.Installed) { $missingFeatures += $requiredName }
-        }
+    $featureState = Get-WindowsFeatureState ($requiredFeatureNames + $optionalFeatureNames)
+    $missingRequired = @($featureState.NotInstalled | Where-Object { $_ -in $requiredFeatureNames })
+    $missingOptional = @($featureState.NotInstalled | Where-Object { $_ -in $optionalFeatureNames })
+    $featureStateUnavailable = -not $featureState.Available -or $featureState.Error
+    $featureStatus = if ($featureStateUnavailable) {
+        'Warn'
+    } elseif ($missingRequired.Count -gt 0) {
+        'Fail'
+    } elseif ($missingOptional.Count -gt 0 -or $featureState.Unknown.Count -gt 0) {
+        'Warn'
+    } else {
+        'Pass'
     }
-    Add-Result -Id 'NDES04' -Category NDES -Name 'Required NDES and IIS Windows features' `
-        -Status $(if (-not $featureState.Available -or $featureState.Error) { 'Warn' } elseif ($missingFeatures.Count -eq 0) { 'Pass' } else { 'Fail' }) `
-        -Detail $(if (-not $featureState.Available -or $featureState.Error) { "Feature state unavailable: $($featureState.Error)" } elseif ($missingFeatures.Count -eq 0) { 'All required role services and features are installed.' } else { 'Missing: ' + ($missingFeatures -join ', ') }) `
-        -Remediation 'Install the documented NDES prerequisites: IIS Request Filtering, ASP.NET/.NET 3.5 and 4.7.2, WCF HTTP Activation, and IIS 6 Metabase/WMI compatibility.'
+    $featureDetail = if ($featureStateUnavailable) {
+        "Feature state unavailable: $($featureState.Error)"
+    } else {
+        "MissingRequired={0}; MissingOptional={1}; NotOfferedByThisOS={2}" -f `
+            $(if ($missingRequired.Count) { $missingRequired -join ', ' } else { '<none>' }),
+            $(if ($missingOptional.Count) { $missingOptional -join ', ' } else { '<none>' }),
+            $(if ($featureState.Unknown.Count) { $featureState.Unknown -join ', ' } else { '<none>' })
+    }
+    Add-Result -Id 'NDES04' -Category NDES -Name 'Required NDES and IIS Windows features' -Status $featureStatus `
+        -Detail $featureDetail `
+        -Remediation 'Install the required NDES prerequisites: IIS Request Filtering, ASP.NET and .NET Extensibility 4.5 or later, WCF HTTP Activation, the IIS management console, and IIS 6 Metabase/WMI compatibility. The optional .NET Framework 3.5 features are only needed by older NDES guidance.'
 
     if ($ndesInstalled -and $os -lt [Version]'10.0.17763') {
         Add-Result -Id 'NDES05' -Category NDES -Name 'Strong certificate mapping server support' -Status 'Warn' `

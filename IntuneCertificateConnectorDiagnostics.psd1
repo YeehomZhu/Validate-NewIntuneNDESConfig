@@ -1,6 +1,6 @@
 @{
     RootModule        = 'IntuneCertificateConnectorDiagnostics.psm1'
-    ModuleVersion     = '2.4.0'
+    ModuleVersion     = '2.4.1'
     GUID              = 'bb2983e7-ce6b-4ffe-9a20-84f1c8ed502c'
     Author            = 'Leon Zhu, Jerry Abouelnasr'
     CompanyName       = ''
@@ -59,6 +59,21 @@ Acknowledgement: Thanks to Jerry Abouelnasr for the feature-detection idea.
             LicenseUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig/blob/master/LICENSE'
             ProjectUri = 'https://github.com/YeehomZhu/Validate-NewIntuneNDESConfig'
             ReleaseNotes = @'
+Version 2.4.1:
+- NDES04 no longer fails when a required feature name does not exist on the
+    running OS. The feature inventory is read once per run and filtered locally,
+    so one unrecognized name can no longer abort the whole query and blank out
+    the NDES role state, which previously skipped every IIS and certificate check.
+- NDES04 separates required IIS and .NET 4.5 role services, which still fail
+    when missing, from the legacy .NET Framework 3.5 features, which now warn.
+- CON04 no longer fails a connector account just because it is not a local
+    administrator. Least privilege is supported, so that now warns.
+- CON04 treats a running service as proof that Log on as a service is granted,
+    which removes a false failure when the right comes from a group that
+    secedit does not expand.
+- CON04 recognizes LOCAL SERVICE and NETWORK SERVICE as built-in accounts and
+    skips the rights and group probes for them.
+
 Version 2.4.0:
 - Adds -HtmlReport and -HtmlReportPath, which write one self-contained HTML
     report next to the transcript.
