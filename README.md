@@ -303,7 +303,7 @@ Special thanks to **Jerry Abouelnasr** for providing the new idea that inspired 
 
 | Version | Notes |
 |---------|-------|
-| 2.4.1 | Fixed NDES04 false failures from unrecognized feature names and from legacy .NET 3.5 features, and fixed CON04 false failures for least-privileged accounts and for logon rights granted through a group |
+| 2.4.1 | Fixed NDES04 false failures from unrecognized feature names and from legacy .NET 3.5 features, fixed CON04 false failures for least-privileged accounts and for logon rights granted through a group, and stopped LOC06 from warning about roots that Windows downloads on demand |
 | 2.4.0 | Added an optional self-contained HTML report with an at-a-glance status summary, a prioritized action plan, and a CSS-only status filter |
 | 2.3.0 | Fixed a socket leak, multi-SAN certificate name matching, nested local-group membership, IIS binding and log collection accuracy, and locale-dependent clock-skew parsing; the run now restores the process-wide TLS setting and honors `-ErrorAction` |
 | 2.2.0 | Tightened authenticated ServiceAddresses and service-map validation; added defensive RUN01 fallback reporting |

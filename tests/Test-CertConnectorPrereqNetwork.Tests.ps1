@@ -422,7 +422,7 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
         InModuleScope IntuneCertificateConnectorDiagnostics {
             $context = Initialize-DiagnosticContext -ConnectorType 'PFXCertificateConnector' -BaseAddress 'https://manage.microsoft.com'
             $results = @(
-                [pscustomobject]@{ Id = 'AAA01'; Category = 'Local'; Name = 'Passing check'; Status = 'Pass'; Detail = 'pass detail'; Remediation = 'hidden for a pass'; Case = $false }
+                [pscustomobject]@{ Id = 'AAA01'; Category = 'Local'; Name = 'Passing check'; Status = 'Pass'; Detail = 'pass detail'; Remediation = 'hidden for a pass'; Case = $true }
                 [pscustomobject]@{ Id = 'BBB02'; Category = 'Network'; Name = 'Warning check'; Status = 'Warn'; Detail = 'warn detail'; Remediation = 'do the warn fix'; Case = $false }
                 [pscustomobject]@{ Id = 'CCC03'; Category = 'NDES'; Name = 'Failing check'; Status = 'Fail'; Detail = 'fail detail'; Remediation = 'do the fail fix'; Case = $true }
             )
@@ -434,8 +434,11 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
             $html | Should -Not -Match '<script'
             $html | Should -Not -Match '(src|href)="https?://'
             $html | Should -Match '<h2>Action plan</h2>'
-            $html | Should -Match 'KNOWN CASE'
             $html | Should -Match 'id="chk-AAA01"'
+
+            # The incident tag belongs to the failing check only: once in the
+            # action plan and once on its card. A passing check never carries it.
+            ([regex]::Matches($html, 'KNOWN CASE')).Count | Should -Be 2
 
             # Failures are actioned before warnings.
             $html.IndexOf('do the fail fix') | Should -BeLessThan $html.IndexOf('do the warn fix')
@@ -670,6 +673,40 @@ Describe 'IntuneCertificateConnectorDiagnostics module contract' {
                 $accounts[0].Status | Should -Be 'Pass'
                 $accounts[0].Detail | Should -Match 'BuiltInAccount=True'
                 Should -Invoke Test-AccountUserRight -Times 0
+            } finally {
+                Remove-Item $logPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'flags a missing reference root only when automatic root update is off' {
+        InModuleScope IntuneCertificateConnectorDiagnostics {
+            $disableRootAutoUpdate = $null
+            Mock Get-Reg {
+                if ($Name -eq 'DisableRootAutoUpdate') { return $disableRootAutoUpdate }
+                return $null
+            }
+
+            $logPath = Join-Path ([IO.Path]::GetTempPath()) ("loc06-{0}.log" -f [guid]::NewGuid())
+            try {
+                $enabled = Test-IntuneCertificateConnector `
+                    -SkipNdesChecks -SkipNetworkChecks -SkipEventLogChecks -SkipDynamic `
+                    -OutFile $logPath -PassThru 6>$null
+                $enabledResult = @($enabled.Results | Where-Object Id -eq 'LOC06')[0]
+
+                # Windows fetches a missing root on demand, so this must never warn.
+                $enabledResult.Status | Should -Not -Be 'Warn'
+                $enabledResult.Detail | Should -Match 'AutomaticRootUpdateDisabled=False'
+
+                $disableRootAutoUpdate = 1
+                $disabled = Test-IntuneCertificateConnector `
+                    -SkipNdesChecks -SkipNetworkChecks -SkipEventLogChecks -SkipDynamic `
+                    -OutFile $logPath -PassThru 6>$null
+                $disabledResult = @($disabled.Results | Where-Object Id -eq 'LOC06')[0]
+
+                # With the update turned off a missing root becomes actionable.
+                $disabledResult.Status | Should -Not -Be 'Info'
+                $disabledResult.Detail | Should -Match 'AutomaticRootUpdateDisabled=True'
             } finally {
                 Remove-Item $logPath -Force -ErrorAction SilentlyContinue
             }

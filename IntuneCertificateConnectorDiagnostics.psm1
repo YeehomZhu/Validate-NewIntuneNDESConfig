@@ -143,7 +143,9 @@ function Add-Result {
         'Fail' { 'Red' }
         default { 'Cyan' }
     }
-    $tag = if ($Case) { ' [CASE]' } else { '' }
+    # The incident tag is only meaningful for an actionable result, so a passing
+    # or informational check never carries it.
+    $tag = if ($Case -and $Status -in @('Fail', 'Warn')) { ' [CASE]' } else { '' }
     Write-Line ("  {0} {1,-16} {2}{3}" -f $glyph, $Id, $Name, $tag) $color
     if ($Detail) {
         Write-Line ("           {0}" -f $Detail) 'DarkGray'
@@ -456,7 +458,8 @@ function ConvertTo-DiagnosticHtmlReport {
     foreach ($item in $checks) {
         $itemClass = $statusClass[[string]$item.Status]
         $anchor = 'chk-' + ([string]$item.Id -replace '[^A-Za-z0-9]', '-')
-        $caseTag = if ($item.Case) { '<span class="case">KNOWN CASE</span>' } else { '' }
+        # The incident tag is only meaningful for an actionable result.
+        $caseTag = if ($item.Case -and $item.Status -in @('Fail', 'Warn')) { '<span class="case">KNOWN CASE</span>' } else { '' }
         $html.Add(('<article class="item s-{0}" id="{1}">' -f $itemClass, $anchor))
         $html.Add(('<div><span class="badge {0}">{1}</span> <code>{2}</code><span class="cat">{3}</span><h3>{4}</h3>{5}</div>' -f $itemClass, (ConvertTo-HtmlText ([string]$item.Status).ToUpperInvariant()), (ConvertTo-HtmlText ([string]$item.Id)), (ConvertTo-HtmlText ([string]$item.Category)), (ConvertTo-HtmlText ([string]$item.Name)), $caseTag))
         if ($item.Detail) {
@@ -2600,10 +2603,35 @@ $missingRoots = @()
 foreach ($entry in $knownRoots.GetEnumerator()) {
     if (-not $rootStore.ContainsKey($entry.Value)) { $missingRoots += $entry.Key }
 }
-Add-Result -Id 'LOC06' -Category Local -Name 'Reference Microsoft and DigiCert roots present' `
-    -Status $(if ($missingRoots.Count -eq 0) { 'Pass' } else { 'Warn' }) -Case `
-    -Detail $(if ($missingRoots.Count -eq 0) { "All $($knownRoots.Count) reference roots are present." } else { 'Missing reference roots: ' + ($missingRoots -join ', ') }) `
-    -Remediation 'Update trusted roots or enable automatic root update. NET07 validates the actual live service chain and is authoritative.'
+# Windows keeps only a subset of trusted roots locally and downloads the rest on
+# demand, so a missing reference root is normal. It is only actionable when the
+# automatic root update that would fetch it has been turned off.
+$rootAutoUpdatePolicy = Get-Reg 'SOFTWARE\Policies\Microsoft\SystemCertificates\AuthRoot' 'DisableRootAutoUpdate'
+$rootAutoUpdateLocal = Get-Reg 'SOFTWARE\Microsoft\SystemCertificates\AuthRoot' 'DisableRootAutoUpdate'
+$rootAutoUpdateDisabled = ($null -ne $rootAutoUpdatePolicy -and [int]$rootAutoUpdatePolicy -eq 1) -or
+    ($null -ne $rootAutoUpdateLocal -and [int]$rootAutoUpdateLocal -eq 1)
+$rootStatus = if ($missingRoots.Count -eq 0) {
+    'Pass'
+} elseif ($rootAutoUpdateDisabled) {
+    'Warn'
+} else {
+    'Info'
+}
+$rootRemediation = if ($rootAutoUpdateDisabled) {
+    'Automatic root update is disabled, so Windows cannot fetch a missing root on demand. Import the listed roots or re-enable automatic root update. NET07 validates the live service chain and is authoritative.'
+} else {
+    'No action is needed. Windows downloads a trusted root on demand, so a reference root can be absent on a healthy server. NET07 validates the live service chain and is authoritative.'
+}
+Add-Result -Id 'LOC06' -Category Local -Name 'Reference root certificates and automatic root update' `
+    -Status $rootStatus -Case `
+    -Detail ("Present={0}/{1}; Missing={2}; AutomaticRootUpdateDisabled={3} (policy={4}, local={5})" -f `
+        ($knownRoots.Count - $missingRoots.Count),
+            $knownRoots.Count,
+        $(if ($missingRoots.Count) { $missingRoots -join ', ' } else { '<none>' }),
+            $rootAutoUpdateDisabled,
+        $(if ($null -eq $rootAutoUpdatePolicy) { 'not set' } else { $rootAutoUpdatePolicy }),
+        $(if ($null -eq $rootAutoUpdateLocal) { 'not set' } else { $rootAutoUpdateLocal })) `
+    -Remediation $rootRemediation
 
 $connectorServiceNames = @(
     'PFXCertificateConnectorSvc',

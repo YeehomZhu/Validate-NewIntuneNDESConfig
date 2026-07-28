@@ -73,6 +73,13 @@ Version 2.4.1:
     secedit does not expand.
 - CON04 recognizes LOCAL SERVICE and NETWORK SERVICE as built-in accounts and
     skips the rights and group probes for them.
+- LOC06 no longer warns just because a reference root is absent. Windows keeps
+    only a subset of roots locally and downloads the rest on demand, so the
+    check now reports that as information and warns only when automatic root
+    update is disabled and a missing root can no longer be fetched.
+- The known-incident tag is shown only on a failing or warning result, so a
+    passing check no longer looks like an open issue in the console and the
+    HTML report.
 
 Version 2.4.0:
 - Adds -HtmlReport and -HtmlReportPath, which write one self-contained HTML
